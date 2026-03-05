@@ -1,0 +1,44 @@
+# .dockerignore
+# ──────────────────────────────────────────────────────────────
+# Tells Docker what NOT to copy into the container.
+# Smaller image = faster builds + less attack surface.
+# Think of it like .gitignore but for Docker.
+# ──────────────────────────────────────────────────────────────
+
+# Python cache files — never needed inside Docker
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments — Docker installs its own
+.venv/
+venv/
+env/
+*.kluvd/
+
+# Test files — not needed at runtime in AWS
+tests/
+pytest.ini
+.coverage
+htmlcov/
+
+# Secrets — NEVER go into a Docker image
+.env
+*.env
+.env.*
+
+# Git files
+.git/
+.gitignore
+
+# Editor/OS files
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/

@@ -1,0 +1,7 @@
+# RAG Ingest Pipeline — Python dependencies
+
+pdfplumber>=0.10.0                  # PDF text extraction
+langchain-text-splitters>=0.2.0     # RecursiveCharacterTextSplitter
+boto3>=1.34.0               # AWS SDK (Bedrock + credentials)
+opensearch-py>=2.4.0        # OpenSearch client
+requests-aws4auth>=1.2.3    # SigV4 request signing for OpenSearch
