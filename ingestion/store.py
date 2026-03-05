@@ -1,167 +1,141 @@
 """
 store.py
 --------
-Creates an OpenSearch k-NN index (if needed) and bulk-indexes
-embedded chunks produced by embedder.py.
+Stores embedded chunks into Pinecone vector database.
+
+Pinecone replaces OpenSearch as our vector store.
+Same interface — just a different backend.
 """
 
-import json
+import os
 from typing import List
-
-from opensearchpy import OpenSearch, RequestsHttpConnection, helpers
-from requests_aws4auth import AWS4Auth
-import boto3
+from pinecone import Pinecone, ServerlessSpec
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-EMBEDDING_DIM  = 1024           # must match Titan v2 output dimension
-INDEX_NAME     = "rag_chunks"
-REGION         = "us-east-1"
-SERVICE        = "es"           # use "aoss" for OpenSearch Serverless
-
-
-# ── Index mapping ─────────────────────────────────────────────────────────────
-
-INDEX_BODY = {
-    "settings": {
-        "index": {
-            "knn"                  : True,
-            "knn.algo_param.ef_search": 512,
-        }
-    },
-    "mappings": {
-        "properties": {
-            "chunk_id"   : {"type": "keyword"},
-            "doc_id"     : {"type": "keyword"},
-            "page_number": {"type": "integer"},
-            "text"       : {"type": "text"},
-            "metadata"   : {"type": "object"},
-            "embedding"  : {
-                "type"      : "knn_vector",
-                "dimension" : EMBEDDING_DIM,
-                "method"    : {
-                    "name"       : "hnsw",
-                    "space_type" : "cosinesimil",   # cosine similarity
-                    "engine"     : "nmslib",
-                    "parameters" : {
-                        "ef_construction": 512,
-                        "m"              : 16,
-                    },
-                },
-            },
-        }
-    },
-}
+INDEX_NAME    = "rag-vectors"
+EMBEDDING_DIM = 1024          # must match Titan v2 output dimension
 
 
 # ── Client factory ────────────────────────────────────────────────────────────
 
-def _get_opensearch_client(host: str, region: str = REGION) -> OpenSearch:
+def _get_pinecone_client() -> Pinecone:
     """
-    Builds an OpenSearch client that signs every request with AWS SigV4.
+    Creates a Pinecone client using the API key from environment variables.
 
-    *host* should be the bare domain, e.g.:
-        "my-domain.us-east-1.es.amazonaws.com"
-    (no https:// prefix, no trailing slash)
+    Never hardcode your API key in code — always use environment variables!
+    Set it locally like this:
+        Windows: set PINECONE_API_KEY=pcsk-xxxxxxxx
+        Mac/Linux: export PINECONE_API_KEY=pcsk-xxxxxxxx
+    In Lambda we set it as an environment variable in the AWS Console.
     """
-    credentials = boto3.Session().get_credentials()
-    awsauth     = AWS4Auth(
-        credentials.access_key,
-        credentials.secret_key,
-        region,
-        SERVICE,
-        session_token=credentials.token,
-    )
+    api_key = os.environ.get("PINECONE_API_KEY")
 
-    return OpenSearch(
-        hosts              = [{"host": host, "port": 443}],
-        http_auth          = awsauth,
-        use_ssl            = True,
-        verify_certs       = True,
-        connection_class   = RequestsHttpConnection,
-        timeout            = 60,
-    )
+    if not api_key:
+        raise ValueError(
+            "PINECONE_API_KEY environment variable is not set. "
+            "Get your key from app.pinecone.io → API Keys"
+        )
+
+    return Pinecone(api_key=api_key)
 
 
 # ── Index management ──────────────────────────────────────────────────────────
 
-def ensure_index(client: OpenSearch, index: str = INDEX_NAME) -> None:
-    """Create the k-NN index only if it doesn't already exist."""
-    if client.indices.exists(index=index):
-        print(f"[store] index '{index}' already exists — skipping creation")
+def ensure_index(pc: Pinecone, index_name: str = INDEX_NAME) -> None:
+    """
+    Creates the Pinecone index if it doesn't already exist.
+    Safe to call every time — won't overwrite existing data.
+    """
+    existing_indexes = [i.name for i in pc.list_indexes()]
+
+    if index_name in existing_indexes:
+        print(f"[store] index '{index_name}' already exists — skipping creation")
         return
 
-    client.indices.create(index=index, body=INDEX_BODY)
-    print(f"[store] index '{index}' created ✓")
+    print(f"[store] creating index '{index_name}'...")
+    pc.create_index(
+        name      = index_name,
+        dimension = EMBEDDING_DIM,
+        metric    = "cosine",
+        spec      = ServerlessSpec(
+            cloud  = "aws",
+            region = "us-east-1",
+        )
+    )
+    print(f"[store] index '{index_name}' created ✓")
 
 
-# ── Bulk indexing ─────────────────────────────────────────────────────────────
-
-def _build_actions(records: List[dict], index: str):
-    """Generator that yields bulk-index action dicts."""
-    for record in records:
-        yield {
-            "_index" : index,
-            "_id"    : record["chunk_id"],
-            "_source": {
-                "chunk_id"   : record["chunk_id"],
-                "doc_id"     : record["doc_id"],
-                "page_number": record["page_number"],
-                "text"       : record["text"],
-                "embedding"  : record["embedding"],
-                "metadata"   : record.get("metadata", {}),
-            },
-        }
-
+# ── Store embeddings ──────────────────────────────────────────────────────────
 
 def store_embeddings(
     records    : List[dict],
-    host       : str,
-    index      : str  = INDEX_NAME,
-    region     : str  = REGION,
-    chunk_size : int  = 50,        # docs per bulk request
+    index_name : str = INDEX_NAME,
+    batch_size : int = 50,
 ) -> None:
     """
-    Index a list of embedded-chunk dicts into OpenSearch.
+    Upserts embedded chunk records into Pinecone.
+
+    Each record must have:
+        chunk_id  : unique ID string
+        embedding : list of 1024 floats
+        text      : original chunk text
+        doc_id    : source document ID
+        page_number: page number in the PDF
+        metadata  : dict of additional info
 
     Parameters
     ----------
     records    : output from embedder.embed_chunks()
-    host       : OpenSearch domain endpoint (no https://)
-    index      : target index name
-    region     : AWS region
-    chunk_size : number of documents per bulk request
+    index_name : Pinecone index to store into
+    batch_size : number of vectors per upsert call
     """
-    client = _get_opensearch_client(host, region)
-    ensure_index(client, index)
+    pc    = _get_pinecone_client()
+    ensure_index(pc, index_name)
+    index = pc.Index(index_name)
 
-    success, failed = helpers.bulk(
-        client,
-        _build_actions(records, index),
-        chunk_size  = chunk_size,
-        raise_on_error = False,
-    )
+    # Build Pinecone upsert format
+    # Each vector = (id, embedding, metadata)
+    # We store the text in metadata so we can retrieve it at query time
+    vectors = []
+    for record in records:
+        vectors.append({
+            "id"      : record["chunk_id"],
+            "values"  : record["embedding"],
+            "metadata": {
+                "text"       : record["text"],
+                "doc_id"     : record["doc_id"],
+                "page_number": record["page_number"],
+                "source"     : record.get("metadata", {}).get("source", ""),
+            }
+        })
 
-    print(f"[store] indexed {success} docs  |  failed {len(failed)}")
-    if failed:
-        for err in failed[:5]:
-            print("  ✗", json.dumps(err))
+    # Upsert in batches
+    # Pinecone recommends batches of 50-100 vectors at a time
+    total   = len(vectors)
+    success = 0
+
+    for i in range(0, total, batch_size):
+        batch = vectors[i:i + batch_size]
+        index.upsert(vectors=batch)
+        success += len(batch)
+        print(f"[store] upserted {success}/{total} vectors")
+
+    print(f"[store] ✅ done — {success} vectors stored in '{index_name}'")
 
 
 # ── Quick smoke-test ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import sys
-    from chunker  import chunk_pdf
-    from embedder import embed_chunks
+    from ingestion.chunker  import chunk_pdf
+    from ingestion.embedder import embed_chunks
 
-    if len(sys.argv) < 3:
-        print("Usage: python store.py <pdf_path> <opensearch_host>")
+    if len(sys.argv) < 2:
+        print("Usage: python -m ingestion.store <pdf_path>")
         sys.exit(1)
 
-    pdf_file, os_host = sys.argv[1], sys.argv[2]
-
-    chunks  = chunk_pdf(pdf_file)
+    chunks  = chunk_pdf(sys.argv[1])
     records = embed_chunks(chunks)
-    store_embeddings(records, host=os_host)
+    store_embeddings(records)
