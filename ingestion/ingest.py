@@ -104,7 +104,7 @@ if __name__ == "__main__":
       python -m ingestion.ingest <pdf_path> <opensearch_host>
     """
     if len(sys.argv) < 3:
-        print("Usage: python -m ingestion.ingest <pdf_path> <opensearch_host>")
+        print("Usage: python -m ingestion.ingest <pdf_path>")
         sys.exit(1)
 
     pdf_path       = sys.argv[1]
