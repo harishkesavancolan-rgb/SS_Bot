@@ -11,7 +11,7 @@ What we're checking:
   - Empty pages produce no chunks
   - Chunks respect the size limit (roughly)
 """
-#hghjhgj
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -149,7 +149,8 @@ class TestChunkPdf:
     @patch("ingestion.chunker.pdfplumber.open")
     def test_chunk_ids_follow_sequential_naming(self, mock_open):
         """Chunk IDs should follow the pattern doc_id::chunk_0000, 0001..."""
-        fake_page = self._make_mock_page("A tale of two cities far apart. " * 20)
+        # Use longer text to ensure multiple chunks with new size=1000
+        fake_page = self._make_mock_page("A tale of two cities far apart. " * 100)
         mock_open.return_value.__enter__.return_value.pages = [fake_page]
 
         chunks = chunk_pdf("fake.pdf", doc_id="tale")
