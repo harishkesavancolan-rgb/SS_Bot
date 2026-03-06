@@ -1,19 +1,20 @@
 """
 tests/test_store.py
 --------------------
-Tests for store.py — OpenSearch is MOCKED (no real cluster needed).
+Tests for store.py — PostgreSQL is MOCKED (no real database needed).
 
 What we're checking:
-  - ensure_index() creates an index when one doesn't exist
-  - ensure_index() skips creation when index already exists
-  - store_embeddings() calls bulk indexing
-  - Documents are built with the correct structure
+  - ensure_table() creates table and index
+  - store_embeddings() inserts records correctly
+  - store_embeddings() handles empty records gracefully
+  - chunk_id is used as the unique identifier
+  - duplicate chunk_ids are handled gracefully
 """
 
 import pytest
 from unittest.mock import patch, MagicMock, call
 
-from ingestion.store import ensure_index, store_embeddings, INDEX_NAME
+from ingestion.store import ensure_table, store_embeddings
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -30,95 +31,136 @@ def _make_fake_record(chunk_id="doc::chunk_0001"):
     }
 
 
-# ── Test: ensure_index() ──────────────────────────────────────────────────────
+# ── Test: ensure_table() ──────────────────────────────────────────────────────
 
-class TestEnsureIndex:
+class TestEnsureTable:
 
-    def test_creates_index_when_missing(self):
+    def test_creates_extension(self):
         """
-        If the index does NOT exist, ensure_index() should call
-        client.indices.create() exactly once.
+        ensure_table() must enable the pgvector extension.
+        Without this, vector columns won't work.
         """
-        mock_client = MagicMock()
-        # Simulate: index does not exist
-        mock_client.indices.exists.return_value = False
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-        ensure_index(mock_client, index="test_index")
+        ensure_table(mock_conn)
 
-        mock_client.indices.create.assert_called_once()
+        # Check that CREATE EXTENSION was called
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("CREATE EXTENSION" in c for c in calls)
 
-    def test_skips_creation_when_index_exists(self):
-        """
-        If the index ALREADY exists, ensure_index() should NOT call
-        client.indices.create() — we don't want to overwrite existing data!
-        """
-        mock_client = MagicMock()
-        # Simulate: index already exists
-        mock_client.indices.exists.return_value = True
+    def test_creates_chunks_table(self):
+        """ensure_table() must create the chunks table."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-        ensure_index(mock_client, index="test_index")
+        ensure_table(mock_conn)
 
-        mock_client.indices.create.assert_not_called()
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("CREATE TABLE" in c for c in calls)
 
-    def test_checks_correct_index_name(self):
-        """ensure_index() must check for the right index name."""
-        mock_client = MagicMock()
-        mock_client.indices.exists.return_value = True
+    def test_creates_vector_index(self):
+        """ensure_table() must create the ivfflat vector search index."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-        ensure_index(mock_client, index="my_custom_index")
+        ensure_table(mock_conn)
 
-        mock_client.indices.exists.assert_called_once_with(index="my_custom_index")
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("CREATE INDEX" in c for c in calls)
+
+    def test_commits_after_setup(self):
+        """ensure_table() must commit the transaction."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        ensure_table(mock_conn)
+
+        mock_conn.commit.assert_called()
 
 
 # ── Test: store_embeddings() ──────────────────────────────────────────────────
 
 class TestStoreEmbeddings:
 
-    @patch("ingestion.store.helpers.bulk")
-    @patch("ingestion.store._get_opensearch_client")
-    def test_bulk_is_called(self, mock_get_client, mock_bulk):
-        """store_embeddings() must call bulk indexing at least once."""
-        mock_client = MagicMock()
-        mock_client.indices.exists.return_value = True
-        mock_get_client.return_value = mock_client
-        mock_bulk.return_value = (3, [])    # (success_count, failed_list)
+    @patch("ingestion.store.execute_values")
+    @patch("ingestion.store._get_connection")
+    def test_inserts_records(self, mock_get_conn, mock_execute_values):
+        """store_embeddings() must call execute_values to INSERT records."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
 
         records = [_make_fake_record(f"doc::chunk_{i:04d}") for i in range(3)]
-        store_embeddings(records, host="fake-host.us-east-1.es.amazonaws.com")
+        store_embeddings(records)
 
-        mock_bulk.assert_called_once()
+        mock_execute_values.assert_called()
 
-    @patch("ingestion.store.helpers.bulk")
-    @patch("ingestion.store._get_opensearch_client")
-    def test_empty_records_still_calls_bulk(self, mock_get_client, mock_bulk):
-        """Passing an empty list should not crash."""
-        mock_client = MagicMock()
-        mock_client.indices.exists.return_value = True
-        mock_get_client.return_value = mock_client
-        mock_bulk.return_value = (0, [])
+    @patch("ingestion.store._get_connection")
+    def test_empty_records_does_not_crash(self, mock_get_conn):
+        """Passing an empty list should return early without crashing."""
+        mock_conn = MagicMock()
+        mock_get_conn.return_value = mock_conn
 
-        store_embeddings([], host="fake-host.us-east-1.es.amazonaws.com")
+        # Should complete without any exception
+        store_embeddings([])
 
-        # Should still reach bulk without throwing an exception
-        mock_bulk.assert_called_once()
+        # Connection should never be opened for empty records
+        mock_get_conn.assert_not_called()
 
-    @patch("ingestion.store.helpers.bulk")
-    @patch("ingestion.store._get_opensearch_client")
-    def test_uses_chunk_id_as_document_id(self, mock_get_client, mock_bulk):
+    @patch("ingestion.store.execute_values")
+    @patch("ingestion.store._get_connection")
+    def test_connection_is_closed_after_insert(self, mock_get_conn, mock_execute_values):
         """
-        Each document indexed in OpenSearch should use chunk_id as its _id.
-        This ensures we never create duplicate entries for the same chunk.
+        Database connection must always be closed after use —
+        even if an error occurs. This prevents connection leaks.
         """
-        mock_client = MagicMock()
-        mock_client.indices.exists.return_value = True
-        mock_get_client.return_value = mock_client
-        mock_bulk.return_value = (1, [])
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
 
-        records = [_make_fake_record("my_story::chunk_0099")]
-        store_embeddings(records, host="fake-host.us-east-1.es.amazonaws.com")
+        records = [_make_fake_record()]
+        store_embeddings(records)
 
-        # Grab what was passed to bulk and check the action dicts
-        bulk_call_args = mock_bulk.call_args
-        actions = list(bulk_call_args[0][1])   # second positional arg is the generator
+        mock_conn.close.assert_called_once()
 
-        assert actions[0]["_id"] == "my_story::chunk_0099"
+    @patch("ingestion.store._get_connection")
+    def test_connection_closed_even_on_error(self, mock_get_conn):
+        """
+        If an error occurs during insert, the connection
+        must still be closed (the finally block must work).
+        """
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        # Simulate a database error during insert
+        mock_cursor.execute.side_effect = Exception("DB error")
+
+        records = [_make_fake_record()]
+        with pytest.raises(Exception):
+            store_embeddings(records)
+
+        # Connection must still be closed
+        mock_conn.close.assert_called_once()
+
+    @patch("ingestion.store.execute_values")
+    @patch("ingestion.store._get_connection")
+    def test_commits_after_insert(self, mock_get_conn, mock_execute_values):
+        """store_embeddings() must commit the transaction."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        records = [_make_fake_record()]
+        store_embeddings(records)
+
+        mock_conn.commit.assert_called()

@@ -1,167 +1,184 @@
 """
 store.py
 --------
-Creates an OpenSearch k-NN index (if needed) and bulk-indexes
-embedded chunks produced by embedder.py.
+Stores embedded chunks into PostgreSQL using the pgvector extension.
+
+pgvector turns PostgreSQL into a vector database —
+allowing us to search chunks by semantic similarity.
+
+Table structure:
+    chunks
+    ├── id          (auto increment)
+    ├── chunk_id    (unique string ID e.g. "story::chunk_0001")
+    ├── doc_id      (which document this came from)
+    ├── page_number (which page in the PDF)
+    ├── text        (the actual chunk text)
+    ├── embedding   (1024-dimensional vector from Titan v2)
+    └── metadata    (JSON — source filename etc.)
 """
 
+import os
 import json
 from typing import List
 
-from opensearchpy import OpenSearch, RequestsHttpConnection, helpers
-from requests_aws4auth import AWS4Auth
-import boto3
+import psycopg2
+from psycopg2.extras import execute_values
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-EMBEDDING_DIM  = 1024           # must match Titan v2 output dimension
-INDEX_NAME     = "rag_chunks"
-REGION         = "us-east-1"
-SERVICE        = "es"           # use "aoss" for OpenSearch Serverless
+EMBEDDING_DIM = 1024     # must match Titan v2 output dimension
 
 
-# ── Index mapping ─────────────────────────────────────────────────────────────
+# ── Database connection ───────────────────────────────────────────────────────
 
-INDEX_BODY = {
-    "settings": {
-        "index": {
-            "knn"                  : True,
-            "knn.algo_param.ef_search": 512,
-        }
-    },
-    "mappings": {
-        "properties": {
-            "chunk_id"   : {"type": "keyword"},
-            "doc_id"     : {"type": "keyword"},
-            "page_number": {"type": "integer"},
-            "text"       : {"type": "text"},
-            "metadata"   : {"type": "object"},
-            "embedding"  : {
-                "type"      : "knn_vector",
-                "dimension" : EMBEDDING_DIM,
-                "method"    : {
-                    "name"       : "hnsw",
-                    "space_type" : "cosinesimil",   # cosine similarity
-                    "engine"     : "nmslib",
-                    "parameters" : {
-                        "ef_construction": 512,
-                        "m"              : 16,
-                    },
-                },
-            },
-        }
-    },
-}
-
-
-# ── Client factory ────────────────────────────────────────────────────────────
-
-def _get_opensearch_client(host: str, region: str = REGION) -> OpenSearch:
+def _get_connection():
     """
-    Builds an OpenSearch client that signs every request with AWS SigV4.
+    Creates a PostgreSQL connection using environment variables.
 
-    *host* should be the bare domain, e.g.:
-        "my-domain.us-east-1.es.amazonaws.com"
-    (no https:// prefix, no trailing slash)
+    Environment variables needed:
+        DB_HOST      → your RDS endpoint
+        DB_NAME      → ragdb
+        DB_USER      → postgres
+        DB_PASSWORD  → your password
+        DB_PORT      → 5432 (default)
+
+    Never hardcode these values — always use environment variables!
+    Set them locally:
+        Windows: set DB_HOST=rag-db.xxxxxxxxxx.us-east-1.rds.amazonaws.com
+        Mac/Linux: export DB_HOST=rag-db.xxxxxxxxxx.us-east-1.rds.amazonaws.com
+    In Lambda, set them as environment variables in the AWS Console.
     """
-    credentials = boto3.Session().get_credentials()
-    awsauth     = AWS4Auth(
-        credentials.access_key,
-        credentials.secret_key,
-        region,
-        SERVICE,
-        session_token=credentials.token,
-    )
-
-    return OpenSearch(
-        hosts              = [{"host": host, "port": 443}],
-        http_auth          = awsauth,
-        use_ssl            = True,
-        verify_certs       = True,
-        connection_class   = RequestsHttpConnection,
-        timeout            = 60,
+    return psycopg2.connect(
+        host     = os.environ.get("DB_HOST"),
+        dbname   = os.environ.get("DB_NAME",     "ragdb"),
+        user     = os.environ.get("DB_USER",     "postgres"),
+        password = os.environ.get("DB_PASSWORD"),
+        port     = int(os.environ.get("DB_PORT", "5432")),
+        sslmode  = "require",    # always use SSL with RDS
     )
 
 
-# ── Index management ──────────────────────────────────────────────────────────
+# ── Table setup ───────────────────────────────────────────────────────────────
 
-def ensure_index(client: OpenSearch, index: str = INDEX_NAME) -> None:
-    """Create the k-NN index only if it doesn't already exist."""
-    if client.indices.exists(index=index):
-        print(f"[store] index '{index}' already exists — skipping creation")
-        return
+def ensure_table(conn) -> None:
+    """
+    Creates the chunks table and vector index if they don't exist.
+    Safe to call every time — won't overwrite existing data.
 
-    client.indices.create(index=index, body=INDEX_BODY)
-    print(f"[store] index '{index}' created ✓")
+    We create:
+        1. The chunks table to store text + vectors
+        2. An ivfflat index for fast vector similarity search
+    """
+    with conn.cursor() as cur:
+
+        # Enable pgvector extension (safe to run even if already enabled)
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+
+        # Create the chunks table
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS chunks (
+                id          SERIAL PRIMARY KEY,
+                chunk_id    TEXT UNIQUE NOT NULL,
+                doc_id      TEXT NOT NULL,
+                page_number INTEGER,
+                text        TEXT NOT NULL,
+                embedding   vector({EMBEDDING_DIM}),
+                metadata    JSONB
+            );
+        """)
+
+        # Create vector similarity search index
+        # ivfflat = fast approximate nearest neighbour search
+        # lists=100 is a good default for small-medium datasets
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS chunks_embedding_idx
+            ON chunks
+            USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100);
+        """)
+
+        conn.commit()
+        print("[store] table and index ready ✓")
 
 
-# ── Bulk indexing ─────────────────────────────────────────────────────────────
-
-def _build_actions(records: List[dict], index: str):
-    """Generator that yields bulk-index action dicts."""
-    for record in records:
-        yield {
-            "_index" : index,
-            "_id"    : record["chunk_id"],
-            "_source": {
-                "chunk_id"   : record["chunk_id"],
-                "doc_id"     : record["doc_id"],
-                "page_number": record["page_number"],
-                "text"       : record["text"],
-                "embedding"  : record["embedding"],
-                "metadata"   : record.get("metadata", {}),
-            },
-        }
-
+# ── Store embeddings ──────────────────────────────────────────────────────────
 
 def store_embeddings(
     records    : List[dict],
-    host       : str,
-    index      : str  = INDEX_NAME,
-    region     : str  = REGION,
-    chunk_size : int  = 50,        # docs per bulk request
+    batch_size : int = 50,
 ) -> None:
     """
-    Index a list of embedded-chunk dicts into OpenSearch.
+    Inserts embedded chunk records into PostgreSQL.
+
+    Uses INSERT ... ON CONFLICT DO NOTHING so re-running
+    on the same PDF never creates duplicates.
 
     Parameters
     ----------
     records    : output from embedder.embed_chunks()
-    host       : OpenSearch domain endpoint (no https://)
-    index      : target index name
-    region     : AWS region
-    chunk_size : number of documents per bulk request
+    batch_size : number of rows per insert call
     """
-    client = _get_opensearch_client(host, region)
-    ensure_index(client, index)
+    if not records:
+        print("[store] no records to store")
+        return
 
-    success, failed = helpers.bulk(
-        client,
-        _build_actions(records, index),
-        chunk_size  = chunk_size,
-        raise_on_error = False,
-    )
+    conn = _get_connection()
 
-    print(f"[store] indexed {success} docs  |  failed {len(failed)}")
-    if failed:
-        for err in failed[:5]:
-            print("  ✗", json.dumps(err))
+    try:
+        ensure_table(conn)
+
+        with conn.cursor() as cur:
+            total   = len(records)
+            success = 0
+
+            for i in range(0, total, batch_size):
+                batch = records[i:i + batch_size]
+
+                rows = [
+                    (
+                        record["chunk_id"],
+                        record["doc_id"],
+                        record["page_number"],
+                        record["text"],
+                        record["embedding"],
+                        json.dumps(record.get("metadata", {})),
+                    )
+                    for record in batch
+                ]
+
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO chunks
+                        (chunk_id, doc_id, page_number, text, embedding, metadata)
+                    VALUES %s
+                    ON CONFLICT (chunk_id) DO NOTHING
+                    """,
+                    rows,
+                )
+
+                success += len(batch)
+                print(f"[store] inserted {success}/{total} chunks")
+
+            conn.commit()
+            print(f"[store] ✅ done — {success} chunks stored")
+
+    finally:
+        conn.close()
 
 
 # ── Quick smoke-test ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import sys
-    from chunker  import chunk_pdf
-    from embedder import embed_chunks
+    from ingestion.chunker  import chunk_pdf
+    from ingestion.embedder import embed_chunks
 
-    if len(sys.argv) < 3:
-        print("Usage: python store.py <pdf_path> <opensearch_host>")
+    if len(sys.argv) < 2:
+        print("Usage: python -m ingestion.store <pdf_path>")
         sys.exit(1)
 
-    pdf_file, os_host = sys.argv[1], sys.argv[2]
-
-    chunks  = chunk_pdf(pdf_file)
+    chunks  = chunk_pdf(sys.argv[1])
     records = embed_chunks(chunks)
-    store_embeddings(records, host=os_host)
+    store_embeddings(records)
