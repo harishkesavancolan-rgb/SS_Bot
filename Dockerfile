@@ -61,4 +61,4 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # When the container starts, run ingest.py.
 # PDF path and OpenSearch host are passed as arguments:
 #   docker run --env-file .env rag-ingest story.pdf my-host.es.amazonaws.com
-CMD ["ingestion.ingest.handler"]
+CMD ["python", "-m", "awslambdaric", "ingestion.ingest.handler"]
