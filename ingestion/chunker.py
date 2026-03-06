@@ -22,8 +22,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter  # pip insta
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-CHUNK_SIZE    = 500   # max characters per chunk
-CHUNK_OVERLAP = 100   # characters shared between consecutive chunks
+CHUNK_SIZE    = 1000  # max characters per chunk
+CHUNK_OVERLAP = 200   # characters shared between consecutive chunks
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
