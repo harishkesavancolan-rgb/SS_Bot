@@ -1,128 +1,171 @@
 """
 store.py
 --------
-Stores embedded chunks into Pinecone vector database.
+Stores embedded chunks into PostgreSQL using the pgvector extension.
 
-Pinecone replaces OpenSearch as our vector store.
-Same interface — just a different backend.
+pgvector turns PostgreSQL into a vector database —
+allowing us to search chunks by semantic similarity.
+
+Table structure:
+    chunks
+    ├── id          (auto increment)
+    ├── chunk_id    (unique string ID e.g. "story::chunk_0001")
+    ├── doc_id      (which document this came from)
+    ├── page_number (which page in the PDF)
+    ├── text        (the actual chunk text)
+    ├── embedding   (1024-dimensional vector from Titan v2)
+    └── metadata    (JSON — source filename etc.)
 """
 
 import os
+import json
 from typing import List
-from pinecone import Pinecone, ServerlessSpec
+
+import psycopg2
+from psycopg2.extras import execute_values
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-INDEX_NAME    = "rag-vectors"
-EMBEDDING_DIM = 1024          # must match Titan v2 output dimension
+EMBEDDING_DIM = 1024     # must match Titan v2 output dimension
 
 
-# ── Client factory ────────────────────────────────────────────────────────────
+# ── Database connection ───────────────────────────────────────────────────────
 
-def _get_pinecone_client() -> Pinecone:
+def _get_connection():
     """
-    Creates a Pinecone client using the API key from environment variables.
+    Creates a PostgreSQL connection using environment variables.
 
-    Never hardcode your API key in code — always use environment variables!
-    Set it locally like this:
-        Windows: set PINECONE_API_KEY=pcsk-xxxxxxxx
-        Mac/Linux: export PINECONE_API_KEY=pcsk-xxxxxxxx
-    In Lambda we set it as an environment variable in the AWS Console.
+    Environment variables needed:
+        DB_HOST      → your RDS endpoint
+        DB_NAME      → ragdb
+        DB_USER      → postgres
+        DB_PASSWORD  → your password
+        DB_PORT      → 5432 (default)
+
+    Never hardcode these values — always use environment variables!
+    Set them locally:
+        Windows: set DB_HOST=rag-db.xxxxxxxxxx.us-east-1.rds.amazonaws.com
+        Mac/Linux: export DB_HOST=rag-db.xxxxxxxxxx.us-east-1.rds.amazonaws.com
+    In Lambda, set them as environment variables in the AWS Console.
     """
-    api_key = os.environ.get("PINECONE_API_KEY")
-
-    if not api_key:
-        raise ValueError(
-            "PINECONE_API_KEY environment variable is not set. "
-            "Get your key from app.pinecone.io → API Keys"
-        )
-
-    return Pinecone(api_key=api_key)
-
-
-# ── Index management ──────────────────────────────────────────────────────────
-
-def ensure_index(pc: Pinecone, index_name: str = INDEX_NAME) -> None:
-    """
-    Creates the Pinecone index if it doesn't already exist.
-    Safe to call every time — won't overwrite existing data.
-    """
-    existing_indexes = [i.name for i in pc.list_indexes()]
-
-    if index_name in existing_indexes:
-        print(f"[store] index '{index_name}' already exists — skipping creation")
-        return
-
-    print(f"[store] creating index '{index_name}'...")
-    pc.create_index(
-        name      = index_name,
-        dimension = EMBEDDING_DIM,
-        metric    = "cosine",
-        spec      = ServerlessSpec(
-            cloud  = "aws",
-            region = "us-east-1",
-        )
+    return psycopg2.connect(
+        host     = os.environ.get("DB_HOST"),
+        dbname   = os.environ.get("DB_NAME",     "ragdb"),
+        user     = os.environ.get("DB_USER",     "postgres"),
+        password = os.environ.get("DB_PASSWORD"),
+        port     = int(os.environ.get("DB_PORT", "5432")),
+        sslmode  = "require",    # always use SSL with RDS
     )
-    print(f"[store] index '{index_name}' created ✓")
+
+
+# ── Table setup ───────────────────────────────────────────────────────────────
+
+def ensure_table(conn) -> None:
+    """
+    Creates the chunks table and vector index if they don't exist.
+    Safe to call every time — won't overwrite existing data.
+
+    We create:
+        1. The chunks table to store text + vectors
+        2. An ivfflat index for fast vector similarity search
+    """
+    with conn.cursor() as cur:
+
+        # Enable pgvector extension (safe to run even if already enabled)
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+
+        # Create the chunks table
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS chunks (
+                id          SERIAL PRIMARY KEY,
+                chunk_id    TEXT UNIQUE NOT NULL,
+                doc_id      TEXT NOT NULL,
+                page_number INTEGER,
+                text        TEXT NOT NULL,
+                embedding   vector({EMBEDDING_DIM}),
+                metadata    JSONB
+            );
+        """)
+
+        # Create vector similarity search index
+        # ivfflat = fast approximate nearest neighbour search
+        # lists=100 is a good default for small-medium datasets
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS chunks_embedding_idx
+            ON chunks
+            USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100);
+        """)
+
+        conn.commit()
+        print("[store] table and index ready ✓")
 
 
 # ── Store embeddings ──────────────────────────────────────────────────────────
 
 def store_embeddings(
     records    : List[dict],
-    index_name : str = INDEX_NAME,
     batch_size : int = 50,
 ) -> None:
     """
-    Upserts embedded chunk records into Pinecone.
+    Inserts embedded chunk records into PostgreSQL.
 
-    Each record must have:
-        chunk_id  : unique ID string
-        embedding : list of 1024 floats
-        text      : original chunk text
-        doc_id    : source document ID
-        page_number: page number in the PDF
-        metadata  : dict of additional info
+    Uses INSERT ... ON CONFLICT DO NOTHING so re-running
+    on the same PDF never creates duplicates.
 
     Parameters
     ----------
     records    : output from embedder.embed_chunks()
-    index_name : Pinecone index to store into
-    batch_size : number of vectors per upsert call
+    batch_size : number of rows per insert call
     """
-    pc    = _get_pinecone_client()
-    ensure_index(pc, index_name)
-    index = pc.Index(index_name)
+    if not records:
+        print("[store] no records to store")
+        return
 
-    # Build Pinecone upsert format
-    # Each vector = (id, embedding, metadata)
-    # We store the text in metadata so we can retrieve it at query time
-    vectors = []
-    for record in records:
-        vectors.append({
-            "id"      : record["chunk_id"],
-            "values"  : record["embedding"],
-            "metadata": {
-                "text"       : record["text"],
-                "doc_id"     : record["doc_id"],
-                "page_number": record["page_number"],
-                "source"     : record.get("metadata", {}).get("source", ""),
-            }
-        })
+    conn = _get_connection()
 
-    # Upsert in batches
-    # Pinecone recommends batches of 50-100 vectors at a time
-    total   = len(vectors)
-    success = 0
+    try:
+        ensure_table(conn)
 
-    for i in range(0, total, batch_size):
-        batch = vectors[i:i + batch_size]
-        index.upsert(vectors=batch)
-        success += len(batch)
-        print(f"[store] upserted {success}/{total} vectors")
+        with conn.cursor() as cur:
+            total   = len(records)
+            success = 0
 
-    print(f"[store] ✅ done — {success} vectors stored in '{index_name}'")
+            for i in range(0, total, batch_size):
+                batch = records[i:i + batch_size]
+
+                rows = [
+                    (
+                        record["chunk_id"],
+                        record["doc_id"],
+                        record["page_number"],
+                        record["text"],
+                        record["embedding"],
+                        json.dumps(record.get("metadata", {})),
+                    )
+                    for record in batch
+                ]
+
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO chunks
+                        (chunk_id, doc_id, page_number, text, embedding, metadata)
+                    VALUES %s
+                    ON CONFLICT (chunk_id) DO NOTHING
+                    """,
+                    rows,
+                )
+
+                success += len(batch)
+                print(f"[store] inserted {success}/{total} chunks")
+
+            conn.commit()
+            print(f"[store] ✅ done — {success} chunks stored")
+
+    finally:
+        conn.close()
 
 
 # ── Quick smoke-test ──────────────────────────────────────────────────────────

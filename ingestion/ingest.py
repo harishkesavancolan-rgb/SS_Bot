@@ -22,10 +22,8 @@ from ingestion.embedder import embed_chunks
 from ingestion.store    import store_embeddings
 
 
-# ── Config (read from environment variables set in Lambda) ────────────────────
-# We never hardcode these values — Lambda will have them as env vars
-OPENSEARCH_HOST = os.environ.get("OPENSEARCH_HOST", "")
-AWS_REGION      = os.environ.get("AWS_REGION", "us-east-1")
+# ── Config ────────────────────────────────────────────────────────────────────
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 
 # ── Core pipeline ─────────────────────────────────────────────────────────────
@@ -34,6 +32,7 @@ def run_pipeline(pdf_path: str, doc_id: str) -> None:
     """
     Runs the full ingestion pipeline on a PDF file.
     Works the same whether called locally or from Lambda.
+    DB connection details are read from environment variables.
     """
     print(f"[ingest] Starting pipeline for: {doc_id}")
 
@@ -43,8 +42,8 @@ def run_pipeline(pdf_path: str, doc_id: str) -> None:
     # 2. Embed
     records = embed_chunks(chunks, region=AWS_REGION)
 
-    # 3. Store
-    store_embeddings(records, host=OPENSEARCH_HOST, region=AWS_REGION)
+    # 3. Store into PostgreSQL via pgvector
+    store_embeddings(records)
 
     print(f"[ingest] ✅ Pipeline complete for: {doc_id}")
 

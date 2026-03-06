@@ -1,20 +1,20 @@
 """
 tests/test_store.py
 --------------------
-Tests for store.py — Pinecone is MOCKED (no real account needed).
+Tests for store.py — PostgreSQL is MOCKED (no real database needed).
 
 What we're checking:
-  - ensure_index() creates index when it doesn't exist
-  - ensure_index() skips creation when index already exists
-  - store_embeddings() upserts vectors correctly
-  - store_embeddings() batches correctly
-  - chunk_id is used as the vector ID
+  - ensure_table() creates table and index
+  - store_embeddings() inserts records correctly
+  - store_embeddings() handles empty records gracefully
+  - chunk_id is used as the unique identifier
+  - duplicate chunk_ids are handled gracefully
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
-from ingestion.store import ensure_index, store_embeddings, INDEX_NAME
+from ingestion.store import ensure_table, store_embeddings
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -31,123 +31,136 @@ def _make_fake_record(chunk_id="doc::chunk_0001"):
     }
 
 
-# ── Test: ensure_index() ──────────────────────────────────────────────────────
+# ── Test: ensure_table() ──────────────────────────────────────────────────────
 
-class TestEnsureIndex:
+class TestEnsureTable:
 
-    def test_creates_index_when_missing(self):
+    def test_creates_extension(self):
         """
-        If the index does NOT exist, ensure_index() should call
-        pc.create_index() exactly once.
+        ensure_table() must enable the pgvector extension.
+        Without this, vector columns won't work.
         """
-        mock_pc = MagicMock()
-        mock_pc.list_indexes.return_value = []
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-        ensure_index(mock_pc, index_name="test-index")
+        ensure_table(mock_conn)
 
-        mock_pc.create_index.assert_called_once()
+        # Check that CREATE EXTENSION was called
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("CREATE EXTENSION" in c for c in calls)
 
-    def test_skips_creation_when_index_exists(self):
-        """
-        If the index ALREADY exists, ensure_index() should NOT call
-        pc.create_index() — we don't want to overwrite existing data!
-        """
-        mock_pc = MagicMock()
-        mock_index      = MagicMock()
-        mock_index.name = "test-index"
-        mock_pc.list_indexes.return_value = [mock_index]
+    def test_creates_chunks_table(self):
+        """ensure_table() must create the chunks table."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-        ensure_index(mock_pc, index_name="test-index")
+        ensure_table(mock_conn)
 
-        mock_pc.create_index.assert_not_called()
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("CREATE TABLE" in c for c in calls)
 
-    def test_creates_index_with_correct_dimension(self):
-        """Index must be created with 1024 dimensions to match Titan v2."""
-        mock_pc = MagicMock()
-        mock_pc.list_indexes.return_value = []
+    def test_creates_vector_index(self):
+        """ensure_table() must create the ivfflat vector search index."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-        ensure_index(mock_pc, index_name="test-index")
+        ensure_table(mock_conn)
 
-        call_kwargs = mock_pc.create_index.call_args.kwargs
-        assert call_kwargs["dimension"] == 1024
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("CREATE INDEX" in c for c in calls)
 
-    def test_creates_index_with_cosine_metric(self):
-        """Index must use cosine similarity for RAG search."""
-        mock_pc = MagicMock()
-        mock_pc.list_indexes.return_value = []
+    def test_commits_after_setup(self):
+        """ensure_table() must commit the transaction."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-        ensure_index(mock_pc, index_name="test-index")
+        ensure_table(mock_conn)
 
-        call_kwargs = mock_pc.create_index.call_args.kwargs
-        assert call_kwargs["metric"] == "cosine"
+        mock_conn.commit.assert_called()
 
 
 # ── Test: store_embeddings() ──────────────────────────────────────────────────
 
 class TestStoreEmbeddings:
 
-    @patch("ingestion.store._get_pinecone_client")
-    def test_upsert_is_called(self, mock_get_client):
-        """store_embeddings() must call index.upsert() at least once."""
-        mock_pc    = MagicMock()
-        mock_index = MagicMock()
-        mock_index_info      = MagicMock()
-        mock_index_info.name = INDEX_NAME
-        mock_pc.list_indexes.return_value = [mock_index_info]
-        mock_pc.Index.return_value        = mock_index
-        mock_get_client.return_value      = mock_pc
+    @patch("ingestion.store.execute_values")
+    @patch("ingestion.store._get_connection")
+    def test_inserts_records(self, mock_get_conn, mock_execute_values):
+        """store_embeddings() must call execute_values to INSERT records."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
 
         records = [_make_fake_record(f"doc::chunk_{i:04d}") for i in range(3)]
         store_embeddings(records)
 
-        mock_index.upsert.assert_called()
+        mock_execute_values.assert_called()
 
-    @patch("ingestion.store._get_pinecone_client")
-    def test_chunk_id_used_as_vector_id(self, mock_get_client):
-        """
-        Each vector's 'id' in Pinecone must be the chunk_id.
-        This ensures no duplicate entries for the same chunk.
-        """
-        mock_pc    = MagicMock()
-        mock_index = MagicMock()
-        mock_index_info      = MagicMock()
-        mock_index_info.name = INDEX_NAME
-        mock_pc.list_indexes.return_value = [mock_index_info]
-        mock_pc.Index.return_value        = mock_index
-        mock_get_client.return_value      = mock_pc
+    @patch("ingestion.store._get_connection")
+    def test_empty_records_does_not_crash(self, mock_get_conn):
+        """Passing an empty list should return early without crashing."""
+        mock_conn = MagicMock()
+        mock_get_conn.return_value = mock_conn
 
-        records = [_make_fake_record("my_story::chunk_0099")]
-        store_embeddings(records)
+        # Should complete without any exception
+        store_embeddings([])
 
-        upsert_call = mock_index.upsert.call_args.kwargs
-        vectors     = upsert_call["vectors"]
-        assert vectors[0]["id"] == "my_story::chunk_0099"
+        # Connection should never be opened for empty records
+        mock_get_conn.assert_not_called()
 
-    @patch("ingestion.store._get_pinecone_client")
-    def test_text_stored_in_metadata(self, mock_get_client):
+    @patch("ingestion.store.execute_values")
+    @patch("ingestion.store._get_connection")
+    def test_connection_is_closed_after_insert(self, mock_get_conn, mock_execute_values):
         """
-        Text must be stored in Pinecone metadata so we can
-        retrieve it at query time for the RAG chatbot.
+        Database connection must always be closed after use —
+        even if an error occurs. This prevents connection leaks.
         """
-        mock_pc    = MagicMock()
-        mock_index = MagicMock()
-        mock_index_info      = MagicMock()
-        mock_index_info.name = INDEX_NAME
-        mock_pc.list_indexes.return_value = [mock_index_info]
-        mock_pc.Index.return_value        = mock_index
-        mock_get_client.return_value      = mock_pc
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
 
         records = [_make_fake_record()]
         store_embeddings(records)
 
-        upsert_call = mock_index.upsert.call_args.kwargs
-        vectors     = upsert_call["vectors"]
-        assert "text" in vectors[0]["metadata"]
+        mock_conn.close.assert_called_once()
 
-    @patch("ingestion.store._get_pinecone_client")
-    def test_empty_records_does_not_crash(self, mock_get_client):
-        """Passing an empty list should not crash."""
-        mock_pc = MagicMock()
-        mock_get_client.return_value = mock_pc
+    @patch("ingestion.store._get_connection")
+    def test_connection_closed_even_on_error(self, mock_get_conn):
+        """
+        If an error occurs during insert, the connection
+        must still be closed (the finally block must work).
+        """
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
 
-        store_embeddings([])
+        # Simulate a database error during insert
+        mock_cursor.execute.side_effect = Exception("DB error")
+
+        records = [_make_fake_record()]
+        with pytest.raises(Exception):
+            store_embeddings(records)
+
+        # Connection must still be closed
+        mock_conn.close.assert_called_once()
+
+    @patch("ingestion.store.execute_values")
+    @patch("ingestion.store._get_connection")
+    def test_commits_after_insert(self, mock_get_conn, mock_execute_values):
+        """store_embeddings() must commit the transaction."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_get_conn.return_value = mock_conn
+
+        records = [_make_fake_record()]
+        store_embeddings(records)
+
+        mock_conn.commit.assert_called()
