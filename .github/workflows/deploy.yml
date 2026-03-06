@@ -18,7 +18,8 @@ name: RAG Ingest Pipeline — CI/CD
 on:
   push:
     branches:
-      - "feature/*"       # CI: triggers on any feature branch push
+      - "feature/*" 
+      - "main"      # CI: triggers on any feature branch push
   pull_request:
     branches:
       - main              # CD: triggers when PR is merged into main
