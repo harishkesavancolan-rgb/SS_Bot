@@ -106,6 +106,7 @@ def ensure_table(conn) -> None:
 
 def store_embeddings(
     records    : List[dict],
+    user_id    : str = "default_user",
     batch_size : int = 50,
 ) -> None:
     """
@@ -117,6 +118,7 @@ def store_embeddings(
     Parameters
     ----------
     records    : output from embedder.embed_chunks()
+    user_id    : owner of these chunks (isolates per user)
     batch_size : number of rows per insert call
     """
     if not records:
@@ -143,6 +145,7 @@ def store_embeddings(
                         record["text"],
                         record["embedding"],
                         json.dumps(record.get("metadata", {})),
+                        user_id,              # ← save user_id per chunk
                     )
                     for record in batch
                 ]
@@ -151,7 +154,7 @@ def store_embeddings(
                     cur,
                     """
                     INSERT INTO chunks
-                        (chunk_id, doc_id, page_number, text, embedding, metadata)
+                        (chunk_id, doc_id, page_number, text, embedding, metadata, user_id)
                     VALUES %s
                     ON CONFLICT (chunk_id) DO NOTHING
                     """,
@@ -162,7 +165,7 @@ def store_embeddings(
                 print(f"[store] inserted {success}/{total} chunks")
 
             conn.commit()
-            print(f"[store] ✅ done — {success} chunks stored")
+            print(f"[store] ✅ done — {success} chunks stored for user '{user_id}'")
 
     finally:
         conn.close()

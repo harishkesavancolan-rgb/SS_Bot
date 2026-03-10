@@ -28,13 +28,13 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 # ── Core pipeline ─────────────────────────────────────────────────────────────
 
-def run_pipeline(pdf_path: str, doc_id: str) -> None:
+def run_pipeline(pdf_path: str, doc_id: str, user_id: str = "default_user") -> None:
     """
     Runs the full ingestion pipeline on a PDF file.
     Works the same whether called locally or from Lambda.
     DB connection details are read from environment variables.
     """
-    print(f"[ingest] Starting pipeline for: {doc_id}")
+    print(f"[ingest] Starting pipeline for: {doc_id} (user: {user_id})")
 
     # 1. Chunk
     chunks = chunk_pdf(pdf_path, doc_id=doc_id)
@@ -43,7 +43,7 @@ def run_pipeline(pdf_path: str, doc_id: str) -> None:
     records = embed_chunks(chunks, region=AWS_REGION)
 
     # 3. Store into PostgreSQL via pgvector
-    store_embeddings(records)
+    store_embeddings(records, user_id=user_id)
 
     print(f"[ingest] ✅ Pipeline complete for: {doc_id}")
 
@@ -71,10 +71,19 @@ def handler(event, context):
     # S3 can send multiple files in one event — loop through each
     for record in event.get("Records", []):
         bucket = record["s3"]["bucket"]["name"]
-        key    = record["s3"]["object"]["key"]     # e.g. "story.pdf"
-        doc_id = key.replace(".pdf", "").replace("/", "_")
+        key    = record["s3"]["object"]["key"]     # e.g. "user_abc123/story.pdf"
 
-        print(f"[ingest] Received S3 event: s3://{bucket}/{key}")
+        # Extract user_id from S3 key
+        # S3 key format: user_id/filename.pdf
+        # If no folder prefix, use "default_user"
+        if "/" in key:
+            user_id = key.split("/")[0]
+            doc_id  = key.split("/")[1].replace(".pdf", "").replace("/", "_")
+        else:
+            user_id = "default_user"
+            doc_id  = key.replace(".pdf", "").replace("/", "_")
+
+        print(f"[ingest] Received S3 event: s3://{bucket}/{key} (user: {user_id})")
 
         # Download PDF to a temporary file
         # Lambda has a /tmp folder we can write to (max 512MB)
@@ -84,7 +93,7 @@ def handler(event, context):
             s3_client.download_file(bucket, key, tmp_path)
 
         try:
-            run_pipeline(pdf_path=tmp_path, doc_id=doc_id)
+            run_pipeline(pdf_path=tmp_path, doc_id=doc_id, user_id=user_id)
         finally:
             # Always clean up the temp file even if pipeline fails
             os.remove(tmp_path)
@@ -104,7 +113,7 @@ if __name__ == "__main__":
       python -m ingestion.ingest <pdf_path> <opensearch_host>
     """
     if len(sys.argv) < 3:
-        print("Usage: python -m ingestion.ingest <pdf_path>")
+        print("Usage: python -m ingestion.ingest <pdf_path> <opensearch_host>")
         sys.exit(1)
 
     pdf_path       = sys.argv[1]
