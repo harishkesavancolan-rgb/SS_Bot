@@ -25,7 +25,7 @@ from typing import List, Dict
 EMBEDDING_DIM        = 1024
 VECTOR_SEARCH_TOP_K  = 20    # how many candidates to fetch from pgvector
 RERANK_TOP_N         = 5     # how many to keep after reranking
-COHERE_MODEL_ID      = "cohere.rerank-english-v3"
+COHERE_MODEL_ID      = "cohere.rerank-english-v3:0"
 TITAN_MODEL_ID       = "amazon.titan-embed-text-v2:0"
 AWS_REGION           = os.environ.get("AWS_REGION", "us-east-1")
 
