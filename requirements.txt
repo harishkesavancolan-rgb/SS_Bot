@@ -1,7 +1,17 @@
-# RAG Ingest Pipeline — Python dependencies
+# RAG Chatbot — Python dependencies
 
+# ── Ingestion ─────────────────────────────────────────────
 pdfplumber>=0.10.0                  # PDF text extraction
 langchain-text-splitters>=0.2.0     # RecursiveCharacterTextSplitter
-boto3>=1.34.0               # AWS SDK (Bedrock + credentials)
+boto3>=1.34.0                       # AWS SDK (Bedrock + S3 + credentials)
 psycopg2-binary>=2.9.0              # PostgreSQL driver (pgvector)
-awslambdaric>=1.0.0    # AWS Lambda runtime interface client
+awslambdaric>=1.0.0                 # Lambda container runtime interface
+
+# ── Chat API ──────────────────────────────────────────────
+fastapi>=0.110.0                    # async web framework
+mangum>=0.17.0                      # wraps FastAPI for AWS Lambda
+uvicorn>=0.29.0                     # local development server
+
+# ── Testing ───────────────────────────────────────────────
+pytest>=7.0.0                       # test runner
+httpx>=0.27.0                       # test FastAPI endpoints
