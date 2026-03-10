@@ -11,6 +11,7 @@ awslambdaric>=1.0.0                 # Lambda container runtime interface
 fastapi>=0.110.0                    # async web framework
 mangum>=0.17.0                      # wraps FastAPI for AWS Lambda
 uvicorn>=0.29.0                     # local development server
+python-multipart>=0.0.9             #needed for fast api
 
 # ── Testing ───────────────────────────────────────────────
 pytest>=7.0.0                       # test runner
