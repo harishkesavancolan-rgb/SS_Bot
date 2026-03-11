@@ -131,7 +131,7 @@ class TestRerank:
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
         mock_client.rerank.return_value = {
-            "rerankingResults": [
+            "results": [
                 {"index": 0, "relevanceScore": 0.95},
                 {"index": 1, "relevanceScore": 0.87},
             ]
@@ -148,7 +148,7 @@ class TestRerank:
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
         mock_client.rerank.return_value = {
-            "rerankingResults": [{"index": 0, "relevanceScore": 0.95}]
+            "results": [{"index": 0, "relevanceScore": 0.95}]
         }
 
         chunks  = [_make_fake_chunk()]

@@ -162,7 +162,7 @@ def rerank(
 
     # Map rerank scores back to original chunks
     reranked_chunks = []
-    for result in response["rerankingResults"]:
+    for result in response["results"]:
         chunk = chunks[result["index"]].copy()
         chunk["rerank_score"]     = round(result["relevanceScore"], 4)
         chunk["similarity_score"] = round(chunk["similarity_score"], 4)
