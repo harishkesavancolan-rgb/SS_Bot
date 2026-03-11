@@ -115,7 +115,7 @@ class TestGenerateAnswer:
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
     async def test_includes_chat_history(self, mock_boto3):
-        """Chat history must be included in messages sent to Claude."""
+        """Chat history must be included in prompt sent to Titan."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
         mock_client.invoke_model.return_value = _make_fake_claude_response("answer")
@@ -128,9 +128,9 @@ class TestGenerateAnswer:
         await generate_answer("follow up question", [_make_fake_chunk()], history)
 
         body = json.loads(mock_client.invoke_model.call_args.kwargs["body"])
-        roles = [m["role"] for m in body["messages"]]
-        assert "user"      in roles
-        assert "assistant" in roles
+        # Titan Text uses inputText — check history is included in the prompt
+        assert "previous question" in body["inputText"]
+        assert "previous answer"   in body["inputText"]
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
