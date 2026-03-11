@@ -18,8 +18,8 @@ from typing import List, Dict
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-# Amazon Titan Text — free, no approval needed
-CLAUDE_MODEL_ID = "amazon.titan-text-premier-v1:0"
+# Amazon Nova Lite — fast, free, no approval needed
+CLAUDE_MODEL_ID = "us.amazon.nova-lite-v1:0"
 AWS_REGION      = os.environ.get("AWS_REGION", "us-east-1")
 MAX_TOKENS      = 1024   # max length of Claude's response
 
@@ -109,46 +109,31 @@ async def generate_answer(
     """
     client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
-    # Build the current message with context
     current_prompt = _build_prompt(question, chunks)
 
-    # Build messages list
-    # If there's chat history, include it for context
-    # This is what gives the chatbot memory within a session!
+    # Build messages list including chat history
     messages = []
-
-    if chat_history:
-        # Add previous messages from this session
-        # This lets Claude remember earlier parts of the conversation
-        for msg in chat_history[-6:]:   # last 6 messages = 3 exchanges
-            messages.append({
-                "role"   : msg["role"],
-                "content": msg["content"],
-            })
-
-    # Add the current question with retrieved context
-    messages.append({
-        "role"   : "user",
-        "content": current_prompt,
-    })
-
-    # Build full prompt including system prompt and history
-    full_prompt = SYSTEM_PROMPT + "\n\n"
-
     if chat_history:
         for msg in chat_history[-6:]:
-            role    = "User" if msg["role"] == "user" else "Assistant"
-            full_prompt += f"{role}: {msg['content']}\n"
+            messages.append({
+                "role"   : msg["role"],
+                "content": [{"text": msg["content"]}],
+            })
 
-    full_prompt += f"User: {current_prompt}\nAssistant:"
+    messages.append({
+        "role"   : "user",
+        "content": [{"text": current_prompt}],
+    })
 
-    # Titan Text request format
+    # Nova request format (official AWS docs format)
     body = json.dumps({
-        "inputText"        : full_prompt,
-        "textGenerationConfig": {
-            "maxTokenCount": MAX_TOKENS,
-            "temperature"  : 0.7,
-            "topP"         : 0.9,
+        "schemaVersion"   : "messages-v1",
+        "messages"        : messages,
+        "system"          : [{"text": SYSTEM_PROMPT}],
+        "inferenceConfig" : {
+            "maxTokens"  : MAX_TOKENS,
+            "temperature": 0.7,
+            "topP"       : 0.9,
         }
     })
 
@@ -164,7 +149,7 @@ async def generate_answer(
         raise
 
     response_body = json.loads(response["body"].read())
-    answer        = response_body["results"][0]["outputText"]
+    answer        = response_body["output"]["message"]["content"][0]["text"]
 
     print(f"[llm] generated answer ({len(answer)} chars)")
     return answer

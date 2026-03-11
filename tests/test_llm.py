@@ -31,10 +31,10 @@ def _make_fake_chunk(chunk_id="doc::chunk_0001"):
 
 
 def _make_fake_claude_response(answer: str):
-    """Mimics boto3 Titan Text response."""
+    """Mimics boto3 Amazon Nova response."""
     body = MagicMock()
     body.read.return_value = json.dumps({
-        "results": [{"outputText": answer}]
+        "output": {"message": {"content": [{"text": answer}]}}
     }).encode("utf-8")
     return {"body": body}
 
@@ -110,7 +110,7 @@ class TestGenerateAnswer:
         await generate_answer("test", [_make_fake_chunk()])
 
         call_kwargs = mock_client.invoke_model.call_args.kwargs
-        assert "titan" in call_kwargs["modelId"].lower()
+        assert "nova" in call_kwargs["modelId"].lower()
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
@@ -128,9 +128,10 @@ class TestGenerateAnswer:
         await generate_answer("follow up question", [_make_fake_chunk()], history)
 
         body = json.loads(mock_client.invoke_model.call_args.kwargs["body"])
-        # Titan Text uses inputText — check history is included in the prompt
-        assert "previous question" in body["inputText"]
-        assert "previous answer"   in body["inputText"]
+        # Nova uses messages format — check history is included
+        roles = [m["role"] for m in body["messages"]]
+        assert "user"      in roles
+        assert "assistant" in roles
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
