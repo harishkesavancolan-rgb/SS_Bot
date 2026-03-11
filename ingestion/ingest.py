@@ -71,7 +71,11 @@ def handler(event, context):
     # S3 can send multiple files in one event — loop through each
     for record in event.get("Records", []):
         bucket = record["s3"]["bucket"]["name"]
-        key    = record["s3"]["object"]["key"]     # e.g. "user_abc123/story.pdf"
+        key    = record["s3"]["object"]["key"]
+
+        # URL decode the key — S3 encodes spaces as + or %20
+        from urllib.parse import unquote_plus
+        key = unquote_plus(key)
 
         # Extract user_id from S3 key
         # S3 key format: user_id/filename.pdf
