@@ -46,7 +46,11 @@ app = FastAPI(
 # Without this, browsers block requests from different origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["*"],    # allow all origins for now
+    allow_origins     = [
+        "https://harishkesavancolan-rgb.github.io",
+        "http://localhost:3000",
+        "http://localhost:8000",
+    ],
     allow_methods     = ["*"],
     allow_headers     = ["*"],
 )
