@@ -18,8 +18,8 @@ from typing import List, Dict
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-# Claude 3 Haiku — fast and cheap, perfect for our use case
-CLAUDE_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
+# Amazon Titan Text — free, no approval needed
+CLAUDE_MODEL_ID = "amazon.titan-text-premier-v1:0"
 AWS_REGION      = os.environ.get("AWS_REGION", "us-east-1")
 MAX_TOKENS      = 1024   # max length of Claude's response
 
@@ -132,12 +132,24 @@ async def generate_answer(
         "content": current_prompt,
     })
 
-    # Call Claude Haiku via Bedrock
+    # Build full prompt including system prompt and history
+    full_prompt = SYSTEM_PROMPT + "\n\n"
+
+    if chat_history:
+        for msg in chat_history[-6:]:
+            role    = "User" if msg["role"] == "user" else "Assistant"
+            full_prompt += f"{role}: {msg['content']}\n"
+
+    full_prompt += f"User: {current_prompt}\nAssistant:"
+
+    # Titan Text request format
     body = json.dumps({
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens"       : MAX_TOKENS,
-        "system"           : SYSTEM_PROMPT,
-        "messages"         : messages,
+        "inputText"        : full_prompt,
+        "textGenerationConfig": {
+            "maxTokenCount": MAX_TOKENS,
+            "temperature"  : 0.7,
+            "topP"         : 0.9,
+        }
     })
 
     try:
@@ -152,7 +164,7 @@ async def generate_answer(
         raise
 
     response_body = json.loads(response["body"].read())
-    answer        = response_body["content"][0]["text"]
+    answer        = response_body["results"][0]["outputText"]
 
     print(f"[llm] generated answer ({len(answer)} chars)")
     return answer

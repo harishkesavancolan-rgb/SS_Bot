@@ -31,10 +31,10 @@ def _make_fake_chunk(chunk_id="doc::chunk_0001"):
 
 
 def _make_fake_claude_response(answer: str):
-    """Mimics boto3 Claude Haiku response."""
+    """Mimics boto3 Titan Text response."""
     body = MagicMock()
     body.read.return_value = json.dumps({
-        "content": [{"text": answer}]
+        "results": [{"outputText": answer}]
     }).encode("utf-8")
     return {"body": body}
 
@@ -110,7 +110,7 @@ class TestGenerateAnswer:
         await generate_answer("test", [_make_fake_chunk()])
 
         call_kwargs = mock_client.invoke_model.call_args.kwargs
-        assert "haiku" in call_kwargs["modelId"].lower()
+        assert "titan" in call_kwargs["modelId"].lower()
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
