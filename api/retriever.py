@@ -25,7 +25,7 @@ from typing import List, Dict
 EMBEDDING_DIM        = 1024
 VECTOR_SEARCH_TOP_K  = 20    # how many candidates to fetch from pgvector
 RERANK_TOP_N         = 5     # how many to keep after reranking
-COHERE_MODEL_ID      = "cohere.rerank-english-v3:0"
+COHERE_MODEL_ID      = "cohere.rerank-v3-5:0"
 TITAN_MODEL_ID       = "amazon.titan-embed-text-v2:0"
 AWS_REGION           = os.environ.get("AWS_REGION", "us-east-1")
 
@@ -124,40 +124,47 @@ def rerank(
     top_n    : int = RERANK_TOP_N,
 ) -> List[Dict]:
     """
-    Reranks chunks using Cohere Rerank on AWS Bedrock.
+    Reranks chunks using Cohere Rerank 3.5 via bedrock-agent-runtime.
 
-    Cohere reads the question and each chunk carefully,
-    then reorders them by true relevance — not just
-    vector similarity.
-
-    Returns top_n most relevant chunks with updated scores.
+    Uses the dedicated rerank() API — NOT invoke_model().
+    Cohere Rerank requires bedrock-agent-runtime client.
     """
     if not chunks:
         return []
 
-    client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+    # Must use bedrock-agent-runtime NOT bedrock-runtime for reranking
+    client = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
 
-    # Build the rerank request
-    body = json.dumps({
-        "query"    : question,
-        "documents": [chunk["text"] for chunk in chunks],
-        "top_n"    : top_n,
-    })
-
-    response = client.invoke_model(
-        modelId     = COHERE_MODEL_ID,
-        body        = body,
-        contentType = "application/json",
-        accept      = "application/json",
+    response = client.rerank(
+        rerankingConfiguration={
+            "type": "BEDROCK_RERANKING_MODEL",
+            "bedrockRerankingConfiguration": {
+                "modelConfiguration": {
+                    "modelArn": f"arn:aws:bedrock:{AWS_REGION}::foundation-model/{COHERE_MODEL_ID}"
+                },
+                "numberOfResults": top_n,
+            }
+        },
+        sources=[
+            {
+                "type"              : "INLINE",
+                "inlineDocumentSource": {
+                    "type"         : "TEXT",
+                    "textDocument" : {"text": chunk["text"]},
+                }
+            }
+            for chunk in chunks
+        ],
+        textSources=[
+            {"text": question}
+        ],
     )
-
-    rerank_results = json.loads(response["body"].read())["results"]
 
     # Map rerank scores back to original chunks
     reranked_chunks = []
-    for result in rerank_results:
+    for result in response["rerankingResults"]:
         chunk = chunks[result["index"]].copy()
-        chunk["rerank_score"]     = round(result["relevance_score"], 4)
+        chunk["rerank_score"]     = round(result["relevanceScore"], 4)
         chunk["similarity_score"] = round(chunk["similarity_score"], 4)
         reranked_chunks.append(chunk)
 
