@@ -155,8 +155,8 @@ def rerank(
             }
             for chunk in chunks
         ],
-        textSources=[
-            {"text": question}
+        queries=[
+            {"type": "TEXT", "textQuery": {"text": question}}
         ],
     )
 
