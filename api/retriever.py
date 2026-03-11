@@ -135,30 +135,34 @@ def rerank(
     # Must use bedrock-agent-runtime NOT bedrock-runtime for reranking
     client = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
 
-    response = client.rerank(
-        rerankingConfiguration={
-            "type": "BEDROCK_RERANKING_MODEL",
-            "bedrockRerankingConfiguration": {
-                "modelConfiguration": {
-                    "modelArn": f"arn:aws:bedrock:{AWS_REGION}::foundation-model/{COHERE_MODEL_ID}"
-                },
-                "numberOfResults": top_n,
-            }
-        },
-        sources=[
-            {
-                "type"              : "INLINE",
-                "inlineDocumentSource": {
-                    "type"         : "TEXT",
-                    "textDocument" : {"text": chunk["text"]},
+    try:
+        response = client.rerank(
+            rerankingConfiguration={
+                "type": "BEDROCK_RERANKING_MODEL",
+                "bedrockRerankingConfiguration": {
+                    "modelConfiguration": {
+                        "modelArn": f"arn:aws:bedrock:{AWS_REGION}::foundation-model/{COHERE_MODEL_ID}"
+                    },
+                    "numberOfResults": top_n,
                 }
-            }
-            for chunk in chunks
-        ],
-        queries=[
-            {"type": "TEXT", "textQuery": {"text": question}}
-        ],
-    )
+            },
+            sources=[
+                {
+                    "type"              : "INLINE",
+                    "inlineDocumentSource": {
+                        "type"         : "TEXT",
+                        "textDocument" : {"text": chunk["text"]},
+                    }
+                }
+                for chunk in chunks
+            ],
+            queries=[
+                {"type": "TEXT", "textQuery": {"text": question}}
+            ],
+        )
+    except Exception as e:
+        print(f"[retriever] ❌ rerank error: {type(e).__name__}: {str(e)}")
+        raise
 
     # Map rerank scores back to original chunks
     reranked_chunks = []
