@@ -21,7 +21,7 @@ from typing import List, Dict
 # Claude 3 Haiku — fast and cheap, perfect for our use case
 CLAUDE_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
 AWS_REGION      = os.environ.get("AWS_REGION", "us-east-1")
-MAX_TOKENS      = 2000   # max length of Claude's response
+MAX_TOKENS      = 1024   # max length of Claude's response
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
