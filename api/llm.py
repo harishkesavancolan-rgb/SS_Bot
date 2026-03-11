@@ -140,12 +140,16 @@ async def generate_answer(
         "messages"         : messages,
     })
 
-    response = client.invoke_model(
-        modelId     = CLAUDE_MODEL_ID,
-        body        = body,
-        contentType = "application/json",
-        accept      = "application/json",
-    )
+    try:
+        response = client.invoke_model(
+            modelId     = CLAUDE_MODEL_ID,
+            body        = body,
+            contentType = "application/json",
+            accept      = "application/json",
+        )
+    except Exception as e:
+        print(f"[llm] ❌ invoke_model error: {type(e).__name__}: {str(e)}")
+        raise
 
     response_body = json.loads(response["body"].read())
     answer        = response_body["content"][0]["text"]
