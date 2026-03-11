@@ -130,12 +130,12 @@ class TestRerank:
         """rerank() should return at most RERANK_TOP_N chunks."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_bedrock_response({
-            "results": [
-                {"index": 0, "relevance_score": 0.95},
-                {"index": 1, "relevance_score": 0.87},
+        mock_client.rerank.return_value = {
+            "rerankingResults": [
+                {"index": 0, "relevanceScore": 0.95},
+                {"index": 1, "relevanceScore": 0.87},
             ]
-        })
+        }
 
         chunks  = [_make_fake_chunk(f"doc::chunk_{i:04d}") for i in range(5)]
         results = rerank("What is deception?", chunks, top_n=2)
@@ -147,9 +147,9 @@ class TestRerank:
         """Each reranked chunk must have a rerank_score field."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_bedrock_response({
-            "results": [{"index": 0, "relevance_score": 0.95}]
-        })
+        mock_client.rerank.return_value = {
+            "rerankingResults": [{"index": 0, "relevanceScore": 0.95}]
+        }
 
         chunks  = [_make_fake_chunk()]
         results = rerank("test", chunks, top_n=1)
