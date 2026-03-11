@@ -23,7 +23,7 @@ from typing import List, Dict
 # ── Config ────────────────────────────────────────────────────────────────────
 
 EMBEDDING_DIM        = 1024
-VECTOR_SEARCH_TOP_K  = 20    # how many candidates to fetch from pgvector
+VECTOR_SEARCH_TOP_K  = 5     # fetch top 5 directly, no reranking
 RERANK_TOP_N         = 5     # how many to keep after reranking
 COHERE_MODEL_ID      = "cohere.rerank-v3-5:0"
 TITAN_MODEL_ID       = "amazon.titan-embed-text-v2:0"
@@ -197,7 +197,7 @@ def build_sources(chunks: List[Dict]) -> List[Dict]:
         metadata  = chunk.get("metadata", {})
         pdf_title = metadata.get("source", chunk["doc_id"])
         page_num  = chunk.get("page_number", "?")
-        score     = chunk.get("rerank_score", chunk.get("similarity_score", 0))
+        score     = round(chunk.get("similarity_score", 0), 4)
 
         sources.append({
             "chunk_id"   : chunk["chunk_id"],    # unique ID for this chunk
@@ -217,30 +217,27 @@ def build_sources(chunks: List[Dict]) -> List[Dict]:
 
 async def retrieve(question: str, user_id: str) -> Dict:
     """
-    Full retrieval pipeline:
+    Retrieval pipeline:
       1. Embed question
-      2. Vector search
-      3. Rerank
-      4. Build sources
+      2. Vector search → top 5 chunks
+      3. Build sources
 
-    Returns chunks + source references ready for the LLM.
+    Reranking skipped — vector search top 5 is accurate
+    enough for personal scale use.
     """
     # 1. Embed
     question_vector = embed_question(question)
 
-    # 2. Vector search
-    candidates = vector_search(question_vector, user_id)
+    # 2. Vector search — returns top 5 directly
+    chunks = vector_search(question_vector, user_id)
 
-    if not candidates:
+    if not chunks:
         return {"chunks": [], "sources": []}
 
-    # 3. Rerank
-    reranked = rerank(question, candidates)
-
-    # 4. Build sources
-    sources = build_sources(reranked)
+    # 3. Build sources
+    sources = build_sources(chunks)
 
     return {
-        "chunks" : reranked,
+        "chunks" : chunks,
         "sources": sources,
     }
