@@ -363,7 +363,7 @@
       letter-spacing: 0.05em;
     }
 
-    .btn-send:hover   { background: #d4b87a; }
+    .btn-send:hover    { background: #d4b87a; }
     .btn-send:disabled {
       opacity : 0.4;
       cursor  : not-allowed;
@@ -422,28 +422,6 @@
       0%, 60%, 100% { transform: translateY(0);    }
       30%            { transform: translateY(-6px); }
     }
-
-    /* ── User ID input ── */
-    .user-id-bar {
-      display    : flex;
-      align-items: center;
-      gap        : 8px;
-      font-size  : 0.68rem;
-      color      : var(--text-dim);
-      margin-bottom: 10px;
-    }
-
-    #user-id-input {
-      background   : var(--bg);
-      border       : 1px solid var(--border);
-      border-radius: 4px;
-      padding      : 4px 8px;
-      color        : var(--text);
-      font-family  : 'DM Mono', monospace;
-      font-size    : 0.68rem;
-      outline      : none;
-      width        : 160px;
-    }
   </style>
 </head>
 <body>
@@ -487,10 +465,6 @@
     </div>
 
     <div class="input-area">
-      <div class="user-id-bar">
-        user_id:
-        <input type="text" id="user-id-input" value="default_user" placeholder="your user id" />
-      </div>
       <div class="input-row">
         <textarea
           id="question-input"
@@ -524,9 +498,16 @@
   let currentSessionId = null;
   let sessions         = [];
 
-  // ── Get user ID ──────────────────────────────────────────
+  // ── Auto user ID — persists for the browser tab session ─
+  // Generates once per tab, reused across refreshes of that tab.
+  // A new tab always gets a new user ID.
   function getUserId() {
-    return document.getElementById("user-id-input").value.trim() || "default_user";
+    let uid = sessionStorage.getItem("rag_user_id");
+    if (!uid) {
+      uid = "user_" + Math.random().toString(36).slice(2, 10);
+      sessionStorage.setItem("rag_user_id", uid);
+    }
+    return uid;
   }
 
   // ── New session ──────────────────────────────────────────
@@ -681,21 +662,26 @@
 
   // ── Upload PDF ───────────────────────────────────────────
   async function uploadPdf(event) {
-    const file   = event.target.files[0];
+    const file = event.target.files[0];
     if (!file) return;
 
     const status = document.getElementById("upload-status");
     status.textContent = "⏳ Uploading...";
     status.className   = "upload-status";
 
+    // Ensure a session exists before uploading — upload is tied to a session
+    // so documents are isolated per chat
+    if (!currentSessionId) await newSession();
+
     const formData = new FormData();
     formData.append("file", file);
 
     try {
-      const res  = await fetch(`${API}/upload?user_id=${getUserId()}`, {
-        method: "POST",
-        body  : formData,
-      });
+      // Pass both user_id and session_id — backend stores as user_id/session_id/file.pdf
+      const res  = await fetch(
+        `${API}/upload?user_id=${getUserId()}&session_id=${currentSessionId}`,
+        { method: "POST", body: formData }
+      );
       const data = await res.json();
 
       if (res.ok) {
