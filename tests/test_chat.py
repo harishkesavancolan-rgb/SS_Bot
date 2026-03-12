@@ -3,15 +3,12 @@ tests/test_chat.py
 -------------------
 Tests for api/chat.py — FastAPI endpoints.
 
-Uses httpx.AsyncClient to test endpoints without
-a real server or AWS connection.
-
 What we're checking:
   - GET  /           → health check returns 200
   - POST /sessions/new → creates session with ID
   - POST /chat        → returns answer + sources
   - GET  /sessions    → lists user sessions
-  - POST /upload      → rejects non-PDF files
+  - POST /upload      → rejects non-PDF, requires session_id
 """
 
 import pytest
@@ -125,6 +122,27 @@ class TestChat:
     @pytest.mark.asyncio
     @patch("api.chat.retrieve")
     @patch("api.chat.get_session_history")
+    async def test_retrieve_called_with_session_id(self, mock_history, mock_retrieve):
+        """POST /chat must pass session_id to retrieve() for isolation."""
+        mock_history.return_value  = []
+        mock_retrieve.return_value = {"chunks": [], "sources": []}
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            await client.post("/chat", json={
+                "question"  : "What is deception?",
+                "user_id"   : "user_123",
+                "session_id": "session_abc",
+            })
+
+        # Verify session_id was passed to retrieve
+        call_kwargs = mock_retrieve.call_args.kwargs
+        assert call_kwargs.get("session_id") == "session_abc"
+
+    @pytest.mark.asyncio
+    @patch("api.chat.retrieve")
+    @patch("api.chat.get_session_history")
     async def test_404_when_no_chunks_found(self, mock_history, mock_retrieve):
         """POST /chat must return 404 when no relevant chunks found."""
         mock_history.return_value  = []
@@ -153,7 +171,7 @@ class TestUpload:
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.post(
-                "/upload?user_id=user_123",
+                "/upload?user_id=user_123&session_id=session_abc",
                 files={"file": ("test.txt", b"hello", "text/plain")},
             )
 
@@ -161,8 +179,8 @@ class TestUpload:
 
     @pytest.mark.asyncio
     @patch("api.chat.boto3.client")
-    async def test_accepts_pdf(self, mock_boto3):
-        """POST /upload must accept PDF files."""
+    async def test_accepts_pdf_with_session_id(self, mock_boto3):
+        """POST /upload must accept PDF files and include session_id in S3 key."""
         mock_s3 = MagicMock()
         mock_boto3.return_value = mock_s3
 
@@ -170,9 +188,44 @@ class TestUpload:
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.post(
-                "/upload?user_id=user_123",
+                "/upload?user_id=user_123&session_id=session_abc",
                 files={"file": ("test.pdf", b"%PDF-1.4 content", "application/pdf")},
             )
 
         assert response.status_code == 200
         assert "uploaded successfully" in response.json()["message"]
+
+    @pytest.mark.asyncio
+    @patch("api.chat.boto3.client")
+    async def test_s3_key_includes_session_id(self, mock_boto3):
+        """S3 key must be user_id/session_id/filename.pdf for isolation."""
+        mock_s3 = MagicMock()
+        mock_boto3.return_value = mock_s3
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            await client.post(
+                "/upload?user_id=user_123&session_id=session_abc",
+                files={"file": ("test.pdf", b"%PDF-1.4 content", "application/pdf")},
+            )
+
+        # S3 key must contain both user_id and session_id
+        call_args = mock_s3.upload_fileobj.call_args
+        s3_key    = call_args[0][2]   # third positional arg is the key
+        assert "user_123"    in s3_key
+        assert "session_abc" in s3_key
+        assert "test.pdf"    in s3_key
+
+    @pytest.mark.asyncio
+    async def test_upload_missing_session_id_fails(self):
+        """POST /upload without session_id must fail — prevents orphaned uploads."""
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/upload?user_id=user_123",   # no session_id
+                files={"file": ("test.pdf", b"%PDF-1.4 content", "application/pdf")},
+            )
+
+        assert response.status_code == 422   # FastAPI validation error

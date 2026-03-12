@@ -31,16 +31,14 @@ MAX_TOKENS      = 1024   # max length of Claude's response
 #   1. Only use the provided context
 #   2. Be honest when it doesn't know
 #   3. Be concise and clear
-SYSTEM_PROMPT = """You are a helpful assistant that answers questions 
-based strictly on the provided document chunks.
+SYSTEM_PROMPT = """You are a helpful, friendly assistant. You can chat naturally and also answer questions about documents the user has uploaded.
 
 Rules:
-- Only use information from the provided context chunks
-- If the answer is not in the chunks, say "I couldn't find that in the provided document"
-- Give detailed, thorough answers — explain concepts fully
-- Use examples from the text where relevant
-- Do not make up information
-- Reference which part of the document supports your answer"""
+- For greetings, casual conversation, or general knowledge questions, respond naturally and helpfully — you are not limited to documents for these
+- When context chunks are provided, use them to give accurate, detailed answers about the user's documents
+- If a document question cannot be answered from the provided chunks, say "I couldn't find that in your uploaded documents"
+- Never fabricate information from documents — only use what is in the provided chunks
+- Keep responses concise and clear"""
 
 
 # ── Build the prompt ──────────────────────────────────────────────────────────

@@ -10,6 +10,10 @@ Why two steps?
   Reranking is slower but reads the question carefully
   and picks the truly relevant chunks from those 20.
   Together they give fast AND accurate retrieval.
+
+Session isolation:
+  All retrieval is scoped to a specific session_id so
+  documents uploaded in one chat never bleed into another.
 """
 
 import os
@@ -23,8 +27,8 @@ from typing import List, Dict
 # ── Config ────────────────────────────────────────────────────────────────────
 
 EMBEDDING_DIM        = 1024
-VECTOR_SEARCH_TOP_K  = 5     # fetch top 5 directly, no reranking
-RERANK_TOP_N         = 5     # how many to keep after reranking
+VECTOR_SEARCH_TOP_K  = 5
+RERANK_TOP_N         = 5
 COHERE_MODEL_ID      = "cohere.rerank-v3-5:0"
 TITAN_MODEL_ID       = "amazon.titan-embed-text-v2:0"
 AWS_REGION           = os.environ.get("AWS_REGION", "us-east-1")
@@ -73,20 +77,21 @@ def embed_question(question: str) -> List[float]:
 def vector_search(
     question_vector : List[float],
     user_id         : str,
+    session_id      : str,           # ← NEW: scope search to this session
     top_k           : int = VECTOR_SEARCH_TOP_K,
 ) -> List[Dict]:
     """
     Searches pgvector for the most similar chunks to the question.
 
-    Uses cosine distance (<=>operator) to find nearest neighbours.
-    Filters by user_id so users only see their own PDFs.
+    Uses cosine distance (<=>) to find nearest neighbours.
+    Filters by both user_id AND session_id so each chat session
+    only searches documents uploaded within that session.
 
     Returns a list of chunks with similarity scores.
     """
     conn = _get_connection()
 
     try:
-        # RealDictCursor returns rows as dicts instead of tuples
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT
@@ -97,12 +102,13 @@ def vector_search(
                     metadata,
                     1 - (embedding <=> %s::vector) AS similarity_score
                 FROM chunks
-                WHERE user_id = %s
+                WHERE user_id = %s AND session_id = %s
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
             """, (
                 question_vector,
                 user_id,
+                session_id,          # ← session-scoped filter
                 question_vector,
                 top_k,
             ))
@@ -132,7 +138,6 @@ def rerank(
     if not chunks:
         return []
 
-    # Must use bedrock-agent-runtime NOT bedrock-runtime for reranking
     client = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
 
     try:
@@ -164,7 +169,6 @@ def rerank(
         print(f"[retriever] ❌ rerank error: {type(e).__name__}: {str(e)}")
         raise
 
-    # Map rerank scores back to original chunks
     reranked_chunks = []
     for result in response["results"]:
         chunk = chunks[result["index"]].copy()
@@ -185,11 +189,8 @@ def build_sources(chunks: List[Dict]) -> List[Dict]:
     These are displayed as hyperlinks in the chat UI:
         [ArtOfWar.pdf | Page 3 | Score: 0.89]
 
-    Clicking the hyperlink shows the EXACT chunk text
-    that was used to generate the answer — not the whole PDF.
-
-    The frontend uses 'chunk_id' to fetch and display
-    the specific chunk text in a popup/side panel.
+    Clicking the hyperlink shows the exact chunk text
+    used to generate the answer — not the whole PDF.
     """
     sources = []
 
@@ -200,14 +201,12 @@ def build_sources(chunks: List[Dict]) -> List[Dict]:
         score     = round(chunk.get("similarity_score", 0), 4)
 
         sources.append({
-            "chunk_id"   : chunk["chunk_id"],    # unique ID for this chunk
+            "chunk_id"   : chunk["chunk_id"],
             "pdf_title"  : pdf_title,
             "page_number": page_num,
             "score"      : score,
-            "text"       : chunk["text"],        # ← the exact chunk text
+            "text"       : chunk["text"],
             "display"    : f"{pdf_title} | Page {page_num} | Score: {score}",
-            # Frontend generates the hyperlink using chunk_id
-            # Clicking it displays chunk["text"] in a popup
         })
 
     return sources
@@ -215,21 +214,21 @@ def build_sources(chunks: List[Dict]) -> List[Dict]:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-async def retrieve(question: str, user_id: str) -> Dict:
+async def retrieve(question: str, user_id: str, session_id: str) -> Dict:
     """
     Retrieval pipeline:
       1. Embed question
-      2. Vector search → top 5 chunks
+      2. Vector search → top 5 chunks scoped to user + session
       3. Build sources
 
-    Reranking skipped — vector search top 5 is accurate
-    enough for personal scale use.
+    session_id ensures only documents uploaded in this specific
+    chat session are searched — complete isolation between chats.
     """
     # 1. Embed
     question_vector = embed_question(question)
 
-    # 2. Vector search — returns top 5 directly
-    chunks = vector_search(question_vector, user_id)
+    # 2. Vector search — scoped to user_id + session_id
+    chunks = vector_search(question_vector, user_id, session_id)
 
     if not chunks:
         return {"chunks": [], "sources": []}

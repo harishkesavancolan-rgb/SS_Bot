@@ -5,10 +5,10 @@ Tests for api/retriever.py — all AWS and DB calls are MOCKED.
 
 What we're checking:
   - embed_question() returns a 1024-dim vector
-  - vector_search() queries pgvector correctly
+  - vector_search() filters by both user_id AND session_id
   - rerank() calls Cohere and reorders chunks
   - build_sources() builds correct source objects
-  - retrieve() orchestrates all steps correctly
+  - retrieve() passes session_id through the pipeline
 """
 
 import json
@@ -37,7 +37,6 @@ def _make_fake_chunk(chunk_id="doc::chunk_0001", page=3, score=0.89):
 
 
 def _make_fake_bedrock_response(data: dict):
-    """Mimics boto3 bedrock response body."""
     body = MagicMock()
     body.read.return_value = json.dumps(data).encode("utf-8")
     return {"body": body}
@@ -89,7 +88,7 @@ class TestVectorSearch:
         mock_cursor.fetchall.return_value = [_make_fake_chunk()]
         mock_get_conn.return_value = mock_conn
 
-        results = vector_search([0.01] * 1024, user_id="user_123")
+        results = vector_search([0.01] * 1024, user_id="user_123", session_id="session_abc")
 
         assert isinstance(results, list)
 
@@ -102,10 +101,38 @@ class TestVectorSearch:
         mock_cursor.fetchall.return_value = []
         mock_get_conn.return_value = mock_conn
 
-        vector_search([0.01] * 1024, user_id="user_123")
+        vector_search([0.01] * 1024, user_id="user_123", session_id="session_abc")
 
         query = mock_cursor.execute.call_args[0][0]
         assert "user_id" in query
+
+    @patch("api.retriever._get_connection")
+    def test_filters_by_session_id(self, mock_get_conn):
+        """vector_search() must filter by session_id to isolate chat sessions."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchall.return_value = []
+        mock_get_conn.return_value = mock_conn
+
+        vector_search([0.01] * 1024, user_id="user_123", session_id="session_abc")
+
+        query = mock_cursor.execute.call_args[0][0]
+        assert "session_id" in query
+
+    @patch("api.retriever._get_connection")
+    def test_session_id_passed_as_param(self, mock_get_conn):
+        """session_id must be passed as a query parameter, not interpolated."""
+        mock_conn   = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchall.return_value = []
+        mock_get_conn.return_value = mock_conn
+
+        vector_search([0.01] * 1024, user_id="user_123", session_id="session_abc")
+
+        params = mock_cursor.execute.call_args[0][1]
+        assert "session_abc" in params
 
     @patch("api.retriever._get_connection")
     def test_closes_connection(self, mock_get_conn):
@@ -116,7 +143,7 @@ class TestVectorSearch:
         mock_cursor.fetchall.return_value = []
         mock_get_conn.return_value = mock_conn
 
-        vector_search([0.01] * 1024, user_id="user_123")
+        vector_search([0.01] * 1024, user_id="user_123", session_id="session_abc")
 
         mock_conn.close.assert_called_once()
 
@@ -195,3 +222,39 @@ class TestBuildSources:
         sources = build_sources(chunks)
 
         assert "link" not in sources[0]
+
+
+# ── Test: retrieve() — session isolation ─────────────────────────────────────
+
+class TestRetrieve:
+
+    @pytest.mark.asyncio
+    @patch("api.retriever.vector_search")
+    @patch("api.retriever.embed_question")
+    async def test_passes_session_id_to_vector_search(
+        self, mock_embed, mock_vector_search
+    ):
+        """retrieve() must pass session_id to vector_search for isolation."""
+        from api.retriever import retrieve
+
+        mock_embed.return_value        = [0.01] * 1024
+        mock_vector_search.return_value = []
+
+        await retrieve("What is deception?", user_id="user_123", session_id="session_abc")
+
+        call_kwargs = mock_vector_search.call_args
+        assert "session_abc" in call_kwargs[0] or call_kwargs[1].get("session_id") == "session_abc"
+
+    @pytest.mark.asyncio
+    @patch("api.retriever.vector_search")
+    @patch("api.retriever.embed_question")
+    async def test_returns_empty_when_no_chunks(self, mock_embed, mock_vector_search):
+        """retrieve() must return empty chunks/sources when nothing found."""
+        from api.retriever import retrieve
+
+        mock_embed.return_value         = [0.01] * 1024
+        mock_vector_search.return_value = []
+
+        result = await retrieve("test", user_id="user_123", session_id="session_abc")
+
+        assert result == {"chunks": [], "sources": []}

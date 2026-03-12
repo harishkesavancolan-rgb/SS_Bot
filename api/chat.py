@@ -43,29 +43,21 @@ app = FastAPI(
 )
 
 # CORS — allows the frontend (browser) to talk to this API
-# Without this, browsers block requests from different origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = [
-        "https://harishkesavancolan-rgb.github.io",
-        "http://localhost:3000",
-        "http://localhost:8000",
-    ],
+    allow_origins     = ["*"],
+    allow_credentials = False,
     allow_methods     = ["*"],
     allow_headers     = ["*"],
 )
 
-# Mangum wraps FastAPI so it works inside AWS Lambda
-# Without this, Lambda wouldn't know how to run FastAPI
-handler = Mangum(app)
+handler = Mangum(app, lifespan="off")
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 S3_BUCKET  = os.environ.get("S3_BUCKET",  "rag-pdf-uploads-harish")
 
 
 # ── Request/Response models ───────────────────────────────────────────────────
-# Pydantic models define the shape of requests and responses
-# FastAPI uses these to validate input automatically
 
 class ChatRequest(BaseModel):
     question   : str
@@ -185,16 +177,16 @@ async def new_session(request: NewSessionRequest):
     """
     Creates a new chat session for a user.
 
-    Each session has its own independent chat history.
-    Users can create multiple sessions — like opening
-    a new chat tab.
+    Each session has its own independent chat history
+    and its own isolated document space. PDFs uploaded
+    in one session are never visible in another.
 
     Returns a session_id the frontend uses for all
-    subsequent messages in this conversation.
+    subsequent messages and uploads in this conversation.
     """
     ensure_sessions_table()
 
-    session_id = str(uuid.uuid4())    # random unique ID
+    session_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
 
     conn = _get_connection()
@@ -219,20 +211,31 @@ async def chat(request: ChatRequest):
 
     Flow:
         1. Load session history
-        2. Retrieve relevant chunks (vector search + rerank)
-        3. Generate answer (Claude Haiku)
+        2. Retrieve relevant chunks scoped to this session only
+        3. Generate answer (Amazon Nova Lite)
         4. Save messages to session
         5. Return answer + source hyperlinks
 
-    The asyncio nature of FastAPI means multiple users
-    can call this endpoint simultaneously without waiting
-    for each other.
+    Retrieval is scoped to request.session_id so each chat
+    session only searches documents uploaded in that session.
     """
     # 1. Load session history for context
     history = get_session_history(request.session_id)
 
-    # 2. Retrieve relevant chunks
-    retrieval = await retrieve(request.question, request.user_id)
+    # Skip retrieval for very short casual messages
+    CASUAL = {"hi", "hello", "hey", "thanks", "thank you", "ok", "okay", "bye"}
+    if request.question.lower().strip() in CASUAL or len(request.question.strip()) < 4:
+        answer = await generate_answer(request.question, [], history)
+        save_message(request.session_id, "user",      request.question)
+        save_message(request.session_id, "assistant", answer)
+        return ChatResponse(answer=answer, sources=[], session_id=request.session_id)
+
+    # 2. Retrieve relevant chunks — scoped to this session
+    retrieval = await retrieve(
+        question   = request.question,
+        user_id    = request.user_id,
+        session_id = request.session_id,   # ← session-scoped retrieval
+    )
 
     if not retrieval["chunks"]:
         raise HTTPException(
@@ -240,7 +243,7 @@ async def chat(request: ChatRequest):
             detail      = "No relevant content found in your documents"
         )
 
-    # 3. Generate answer with Claude Haiku
+    # 3. Generate answer with Amazon Nova Lite
     answer = await generate_answer(
         question     = request.question,
         chunks       = retrieval["chunks"],
@@ -303,20 +306,23 @@ async def list_sessions(user_id: str):
 
 @app.post("/upload")
 async def upload_pdf(
-    user_id : str,
-    file    : UploadFile = File(...),
+    user_id    : str,
+    session_id : str,              # ← NEW: ties upload to a specific session
+    file       : UploadFile = File(...),
 ):
     """
-    Uploads a PDF to S3.
+    Uploads a PDF to S3, scoped to a specific session.
+
+    S3 key format: user_id/session_id/filename.pdf
+
+    This means:
+      - Each session has its own isolated document space
+      - Chat session A can never retrieve docs from session B
+      - Lambda reads the session_id from the S3 key and stores
+        it in chunk metadata for filtered retrieval
 
     S3 automatically triggers Lambda which:
-        chunks → embeds → stores in pgvector
-
-    The file is stored under user_id/ prefix so
-    each user's PDFs are isolated.
-
-    Example S3 path:
-        user_abc123/ArtOfWar.pdf
+        chunks → embeds → stores in pgvector with session_id
     """
     if not file.filename.endswith(".pdf"):
         raise HTTPException(
@@ -325,16 +331,17 @@ async def upload_pdf(
         )
 
     s3_client = boto3.client("s3", region_name=AWS_REGION)
-    s3_key    = f"{user_id}/{file.filename}"   # namespaced by user_id
+    s3_key    = f"{user_id}/{session_id}/{file.filename}"   # ← session-scoped path
 
     try:
         s3_client.upload_fileobj(file.file, S3_BUCKET, s3_key)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-    print(f"[chat] uploaded {file.filename} for user {user_id}")
+    print(f"[chat] uploaded {file.filename} for user {user_id} / session {session_id}")
     return {
-        "message"  : f"'{file.filename}' uploaded successfully",
-        "s3_key"   : s3_key,
-        "status"   : "processing",     # Lambda will process it automatically
+        "message"   : f"'{file.filename}' uploaded successfully",
+        "s3_key"    : s3_key,
+        "session_id": session_id,
+        "status"    : "processing",
     }

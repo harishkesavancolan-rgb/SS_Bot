@@ -3,18 +3,22 @@ store.py
 --------
 Stores embedded chunks into PostgreSQL using the pgvector extension.
 
-pgvector turns PostgreSQL into a vector database —
-allowing us to search chunks by semantic similarity.
-
 Table structure:
     chunks
     ├── id          (auto increment)
     ├── chunk_id    (unique string ID e.g. "story::chunk_0001")
     ├── doc_id      (which document this came from)
+    ├── user_id     (which user owns this chunk)
+    ├── session_id  (which chat session this chunk belongs to)
     ├── page_number (which page in the PDF)
     ├── text        (the actual chunk text)
     ├── embedding   (1024-dimensional vector from Titan v2)
     └── metadata    (JSON — source filename etc.)
+
+session_id isolation:
+    Each chunk is tagged with the session it was uploaded in.
+    Retrieval filters by both user_id AND session_id so
+    documents from one chat never appear in another.
 """
 
 import os
@@ -27,7 +31,7 @@ from psycopg2.extras import execute_values
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-EMBEDDING_DIM = 1024     # must match Titan v2 output dimension
+EMBEDDING_DIM = 1024
 
 
 # ── Database connection ───────────────────────────────────────────────────────
@@ -42,12 +46,6 @@ def _get_connection():
         DB_USER      → postgres
         DB_PASSWORD  → your password
         DB_PORT      → 5432 (default)
-
-    Never hardcode these values — always use environment variables!
-    Set them locally:
-        Windows: set DB_HOST=rag-db.xxxxxxxxxx.us-east-1.rds.amazonaws.com
-        Mac/Linux: export DB_HOST=rag-db.xxxxxxxxxx.us-east-1.rds.amazonaws.com
-    In Lambda, set them as environment variables in the AWS Console.
     """
     return psycopg2.connect(
         host     = os.environ.get("DB_HOST"),
@@ -55,7 +53,7 @@ def _get_connection():
         user     = os.environ.get("DB_USER",     "postgres"),
         password = os.environ.get("DB_PASSWORD"),
         port     = int(os.environ.get("DB_PORT", "5432")),
-        sslmode  = "require",    # always use SSL with RDS
+        sslmode  = "require",
     )
 
 
@@ -66,21 +64,20 @@ def ensure_table(conn) -> None:
     Creates the chunks table and vector index if they don't exist.
     Safe to call every time — won't overwrite existing data.
 
-    We create:
-        1. The chunks table to store text + vectors
-        2. An ivfflat index for fast vector similarity search
+    session_id column added so retrieval can be scoped
+    per chat session, not just per user.
     """
     with conn.cursor() as cur:
 
-        # Enable pgvector extension (safe to run even if already enabled)
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
 
-        # Create the chunks table
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS chunks (
                 id          SERIAL PRIMARY KEY,
                 chunk_id    TEXT UNIQUE NOT NULL,
                 doc_id      TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                session_id  TEXT NOT NULL DEFAULT 'default_session',
                 page_number INTEGER,
                 text        TEXT NOT NULL,
                 embedding   vector({EMBEDDING_DIM}),
@@ -88,14 +85,18 @@ def ensure_table(conn) -> None:
             );
         """)
 
-        # Create vector similarity search index
-        # ivfflat = fast approximate nearest neighbour search
-        # lists=100 is a good default for small-medium datasets
+        # Index for vector similarity search
         cur.execute("""
             CREATE INDEX IF NOT EXISTS chunks_embedding_idx
             ON chunks
             USING ivfflat (embedding vector_cosine_ops)
             WITH (lists = 100);
+        """)
+
+        # Index on (user_id, session_id) for fast WHERE filtering
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS chunks_user_session_idx
+            ON chunks (user_id, session_id);
         """)
 
         conn.commit()
@@ -107,10 +108,14 @@ def ensure_table(conn) -> None:
 def store_embeddings(
     records    : List[dict],
     user_id    : str = "default_user",
+    session_id : str = "default_session",   # ← NEW: ties chunks to a session
     batch_size : int = 50,
 ) -> None:
     """
     Inserts embedded chunk records into PostgreSQL.
+
+    Each chunk is tagged with both user_id and session_id so
+    retrieval can be scoped to exactly one chat session.
 
     Uses INSERT ... ON CONFLICT DO NOTHING so re-running
     on the same PDF never creates duplicates.
@@ -118,7 +123,8 @@ def store_embeddings(
     Parameters
     ----------
     records    : output from embedder.embed_chunks()
-    user_id    : owner of these chunks (isolates per user)
+    user_id    : owner of these chunks
+    session_id : chat session these chunks belong to
     batch_size : number of rows per insert call
     """
     if not records:
@@ -145,7 +151,8 @@ def store_embeddings(
                         record["text"],
                         record["embedding"],
                         json.dumps(record.get("metadata", {})),
-                        user_id,              # ← save user_id per chunk
+                        user_id,
+                        session_id,           # ← stored per chunk
                     )
                     for record in batch
                 ]
@@ -154,7 +161,7 @@ def store_embeddings(
                     cur,
                     """
                     INSERT INTO chunks
-                        (chunk_id, doc_id, page_number, text, embedding, metadata, user_id)
+                        (chunk_id, doc_id, page_number, text, embedding, metadata, user_id, session_id)
                     VALUES %s
                     ON CONFLICT (chunk_id) DO NOTHING
                     """,
@@ -165,7 +172,7 @@ def store_embeddings(
                 print(f"[store] inserted {success}/{total} chunks")
 
             conn.commit()
-            print(f"[store] ✅ done — {success} chunks stored for user '{user_id}'")
+            print(f"[store] ✅ done — {success} chunks stored for user '{user_id}' / session '{session_id}'")
 
     finally:
         conn.close()
