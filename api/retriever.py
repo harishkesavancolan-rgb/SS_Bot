@@ -23,7 +23,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from typing import List, Dict
 
-
+MIN_SIMILARITY_SCORE = 0.4
 # ── Config ────────────────────────────────────────────────────────────────────
 
 EMBEDDING_DIM        = 1024
@@ -74,23 +74,8 @@ def embed_question(question: str) -> List[float]:
 
 # ── Step 2: Vector search in pgvector ────────────────────────────────────────
 
-def vector_search(
-    question_vector : List[float],
-    user_id         : str,
-    session_id      : str,           # ← NEW: scope search to this session
-    top_k           : int = VECTOR_SEARCH_TOP_K,
-) -> List[Dict]:
-    """
-    Searches pgvector for the most similar chunks to the question.
-
-    Uses cosine distance (<=>) to find nearest neighbours.
-    Filters by both user_id AND session_id so each chat session
-    only searches documents uploaded within that session.
-
-    Returns a list of chunks with similarity scores.
-    """
+def vector_search(question_vector, user_id, session_id, top_k=VECTOR_SEARCH_TOP_K):
     conn = _get_connection()
-
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
@@ -105,22 +90,18 @@ def vector_search(
                 WHERE user_id = %s AND session_id = %s
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
-            """, (
-                question_vector,
-                user_id,
-                session_id,          # ← session-scoped filter
-                question_vector,
-                top_k,
-            ))
+            """, (question_vector, user_id, session_id, question_vector, top_k))
 
             results = [dict(row) for row in cur.fetchall()]
 
     finally:
         conn.close()
 
+    # Filter out chunks that are not relevant enough
+    results = [r for r in results if r["similarity_score"] >= MIN_SIMILARITY_SCORE]
+
     print(f"[retriever] vector search returned {len(results)} candidates")
     return results
-
 
 # ── Step 3: Rerank with Cohere ────────────────────────────────────────────────
 
