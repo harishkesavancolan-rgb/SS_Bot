@@ -487,10 +487,6 @@
     </div>
 
     <div class="input-area">
-      <div class="user-id-bar">
-        user_id:
-        <input type="text" id="user-id-input" value="default_user" placeholder="your user id" />
-      </div>
       <div class="input-row">
         <textarea
           id="question-input"
@@ -524,9 +520,14 @@
   let currentSessionId = null;
   let sessions         = [];
 
-  // ── Get user ID ──────────────────────────────────────────
+  // ── Auto user ID — new ID per browser session ───────────
   function getUserId() {
-    return document.getElementById("user-id-input").value.trim() || "default_user";
+    let uid = sessionStorage.getItem("rag_user_id");
+    if (!uid) {
+      uid = "user_" + Math.random().toString(36).slice(2, 10);
+      sessionStorage.setItem("rag_user_id", uid);
+    }
+    return uid;
   }
 
   // ── New session ──────────────────────────────────────────
