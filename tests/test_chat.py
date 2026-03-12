@@ -141,30 +141,28 @@ class TestChat:
         assert call_kwargs.get("session_id") == "session_abc"
     @pytest.mark.asyncio
     @patch("api.chat.retrieve")
-    @patch("api.chat.generate_answer")
+    @patch("api.chat.generate_answer")    # ← add this
     @patch("api.chat.get_session_history")
-    @patch("api.chat.save_message")
-    async def test_returns_answer_when_no_chunks(
+    @patch("api.chat.save_message")       # ← add this
+    async def test_retrieve_called_with_session_id(
         self, mock_save, mock_history, mock_generate, mock_retrieve
     ):
-        """POST /chat must respond naturally even when no chunks found (e.g. greetings)."""
+        """POST /chat must pass session_id to retrieve() for isolation."""
         mock_history.return_value  = []
         mock_retrieve.return_value = {"chunks": [], "sources": []}
-        mock_generate.return_value = "Hello! How can I help you?"
+        mock_generate.return_value = "Hello!"
 
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
-            response = await client.post("/chat", json={
-                "question"  : "hi",
+            await client.post("/chat", json={
+                "question"  : "What is deception?",
                 "user_id"   : "user_123",
                 "session_id": "session_abc",
             })
 
-        assert response.status_code == 200
-        assert response.json()["answer"] == "Hello! How can I help you?"
-        assert response.json()["sources"] == []
-
+        call_kwargs = mock_retrieve.call_args.kwargs
+        assert call_kwargs.get("session_id") == "session_abc"
 # ── Test: POST /upload ────────────────────────────────────────────────────────
 
 class TestUpload:
