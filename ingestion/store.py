@@ -163,7 +163,7 @@ def store_embeddings(
                     INSERT INTO chunks
                         (chunk_id, doc_id, page_number, text, embedding, metadata, user_id, session_id)
                     VALUES %s
-                    ON CONFLICT (chunk_id) DO NOTHING
+                    ON CONFLICT (chunk_id, session_id) DO NOTHING
                     """,
                     rows,
                 )
