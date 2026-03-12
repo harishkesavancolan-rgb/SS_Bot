@@ -46,15 +46,18 @@ app = FastAPI(
 # Without this, browsers block requests from different origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["*"],
-    allow_credentials = False,
+    allow_origins     = [
+        "https://harishkesavancolan-rgb.github.io",
+        "http://localhost:3000",
+        "http://localhost:8000",
+    ],
     allow_methods     = ["*"],
     allow_headers     = ["*"],
 )
 
 # Mangum wraps FastAPI so it works inside AWS Lambda
 # Without this, Lambda wouldn't know how to run FastAPI
-handler = Mangum(app, lifespan="off")
+handler = Mangum(app)
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 S3_BUCKET  = os.environ.get("S3_BUCKET",  "rag-pdf-uploads-harish")
@@ -227,14 +230,6 @@ async def chat(request: ChatRequest):
     """
     # 1. Load session history for context
     history = get_session_history(request.session_id)
-
-    # Skip retrieval for very short casual messages
-    CASUAL = {"hi", "hello", "hey", "thanks", "thank you", "ok", "okay", "bye"}
-    if request.question.lower().strip() in CASUAL or len(request.question.strip()) < 4:
-        answer   = await generate_answer(request.question, [], history)
-        save_message(request.session_id, "user",      request.question)
-        save_message(request.session_id, "assistant", answer)
-        return ChatResponse(answer=answer, sources=[], session_id=request.session_id)
 
     # 2. Retrieve relevant chunks
     retrieval = await retrieve(request.question, request.user_id)

@@ -31,15 +31,16 @@ MAX_TOKENS      = 1024   # max length of Claude's response
 #   1. Only use the provided context
 #   2. Be honest when it doesn't know
 #   3. Be concise and clear
-SYSTEM_PROMPT = """You are a helpful assistant that answers questions based on the provided document chunks.
+SYSTEM_PROMPT = """You are a helpful assistant that answers questions 
+based strictly on the provided document chunks.
 
 Rules:
-- Answer questions directly and naturally
-- For greetings or casual messages, respond briefly and friendly, then mention what documents are available
-- Only use information from the provided context chunks for factual questions
-- If the answer is not in the chunks, say "I couldn't find that in the provided documents"
-- Give detailed answers for specific questions
-- Do not make up information"""
+- Only use information from the provided context chunks
+- If the answer is not in the chunks, say "I couldn't find that in the provided document"
+- Give detailed, thorough answers — explain concepts fully
+- Use examples from the text where relevant
+- Do not make up information
+- Reference which part of the document supports your answer"""
 
 
 # ── Build the prompt ──────────────────────────────────────────────────────────
@@ -108,7 +109,7 @@ async def generate_answer(
     """
     client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
-    current_prompt = _build_prompt(question, chunks) if chunks else question
+    current_prompt = _build_prompt(question, chunks)
 
     # Build messages list including chat history
     messages = []
