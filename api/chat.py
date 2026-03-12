@@ -202,58 +202,36 @@ async def new_session(request: NewSessionRequest):
 
     print(f"[chat] new session created: {session_id}")
     return NewSessionResponse(session_id=session_id, created_at=created_at)
-
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """
-    Main chat endpoint — the heart of the chatbot.
-
-    Flow:
-        1. Load session history
-        2. Retrieve relevant chunks scoped to this session only
-        3. Generate answer (Amazon Nova Lite)
-        4. Save messages to session
-        5. Return answer + source hyperlinks
-
-    Retrieval is scoped to request.session_id so each chat
-    session only searches documents uploaded in that session.
-    """
-    # 1. Load session history for context
     history = get_session_history(request.session_id)
 
-    # 2. Retrieve relevant chunks — scoped to this session
+    # Always attempt retrieval — LLM decides how to use the chunks
     retrieval = await retrieve(
         question   = request.question,
         user_id    = request.user_id,
-        session_id = request.session_id,   # ← session-scoped retrieval
+        session_id = request.session_id,
     )
 
-    if not retrieval["chunks"]:
-        raise HTTPException(
-            status_code = 404,
-            detail      = "No relevant content found in your documents"
-        )
-
-    # 3. Generate answer with Amazon Nova Lite
+    # Generate answer — with whatever chunks were found (could be empty)
     answer = await generate_answer(
         question     = request.question,
-        chunks       = retrieval["chunks"],
+        chunks       = retrieval["chunks"],   # empty list for casual messages
         chat_history = history,
     )
 
-    # 4. Save both messages to session history
     save_message(request.session_id, "user",      request.question)
     save_message(request.session_id, "assistant", answer)
 
-    # 5. Return answer + sources
+    # Sources only populated if chunks were actually found
     response = build_response(answer, retrieval["sources"])
 
     return ChatResponse(
         answer     = response["answer"],
-        sources    = response["sources"],
+        sources    = response["sources"],   # naturally [] for casual messages
         session_id = request.session_id,
     )
+
 
 
 @app.get("/sessions/{session_id}")
