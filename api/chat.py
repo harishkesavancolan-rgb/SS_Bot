@@ -222,14 +222,6 @@ async def chat(request: ChatRequest):
     # 1. Load session history for context
     history = get_session_history(request.session_id)
 
-    # Skip retrieval for very short casual messages
-    CASUAL = {"hi", "hello", "hey", "thanks", "thank you", "ok", "okay", "bye"}
-    if request.question.lower().strip() in CASUAL or len(request.question.strip()) < 4:
-        answer = await generate_answer(request.question, [], history)
-        save_message(request.session_id, "user",      request.question)
-        save_message(request.session_id, "assistant", answer)
-        return ChatResponse(answer=answer, sources=[], session_id=request.session_id)
-
     # 2. Retrieve relevant chunks — scoped to this session
     retrieval = await retrieve(
         question   = request.question,
