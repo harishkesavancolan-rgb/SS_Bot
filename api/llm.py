@@ -107,7 +107,7 @@ async def generate_answer(
     """
     client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
-    current_prompt = _build_prompt(question, chunks)
+    current_prompt = _build_prompt(question, chunks)if chunks else question
 
     # Build messages list including chat history
     messages = []
