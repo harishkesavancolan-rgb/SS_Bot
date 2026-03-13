@@ -82,7 +82,7 @@ def chunk_pdf(
 
     with pdfplumber.open(path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
-            raw_text = page.extract_text() or ""
+            raw_text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
             raw_text = raw_text.strip()
 
             if not raw_text:
@@ -103,7 +103,7 @@ def chunk_pdf(
                         page_number = page_num,
                         text        = fragment,
                         metadata    = {
-                            "source"     : path.name,
+                            "source"     : f"{doc_id}.pdf",
                             "page_number": page_num,
                         },
                     )
