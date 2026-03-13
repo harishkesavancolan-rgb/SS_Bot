@@ -23,7 +23,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from typing import List, Dict
 
-MIN_SIMILARITY_SCORE = 0.4
+MIN_SIMILARITY_SCORE = 0.2
 # ── Config ────────────────────────────────────────────────────────────────────
 
 EMBEDDING_DIM        = 1024
