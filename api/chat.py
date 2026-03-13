@@ -45,7 +45,10 @@ app = FastAPI(
 # CORS — allows the frontend (browser) to talk to this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["*"],
+    allow_origins     = [
+        "d29w7b3eomg81l.cloudfront.net",
+        "https://harishkesavancolan-rgb.github.io",
+    ],
     allow_credentials = False,
     allow_methods     = ["*"],
     allow_headers     = ["*"],
