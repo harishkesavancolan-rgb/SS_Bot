@@ -15,7 +15,7 @@ from typing import List, Dict
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # Best quality/cost Mistral model - uses signup credits
-MODEL_ID = "mistral.mixtral-8x7b-v1:0"
+MODEL_ID = "mistral.mistral-7b-instruct-v0:2"
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 MAX_TOKENS = 1024
 
