@@ -1,13 +1,10 @@
 """
 api/llm.py
 ----------
-Sends retrieved chunks + user question to Claude Haiku
+Sends retrieved chunks + user question to Mistral Mixtral 8x7B
 and returns a grounded answer.
 
-"Grounded" means Claude only answers based on the
-chunks we provide — not from its training data.
-This ensures answers are always traceable back to
-the user's actual PDF.
+"Grounded" means Mistral only answers based on the chunks we provide.
 """
 
 import os
@@ -15,180 +12,107 @@ import json
 import boto3
 from typing import List, Dict
 
-
 # ── Config ────────────────────────────────────────────────────────────────────
 
-# Amazon Nova Lite — fast, free, no approval needed
-CLAUDE_MODEL_ID = "us.amazon.nova-lite-v1:0"
-AWS_REGION      = os.environ.get("AWS_REGION", "us-east-1")
-MAX_TOKENS      = 1024   # max length of Claude's response
+# Best quality/cost Mistral model - uses signup credits
+MODEL_ID = "mistral.mixtral-8x7b-v1:0"
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+MAX_TOKENS = 1024
 
+# ── System instructions (baked into prompt for Mistral) ───────────────────────
 
-# ── System prompt ─────────────────────────────────────────────────────────────
+SYSTEM_INSTRUCTIONS = """You are a helpful assistant that ONLY answers questions using the provided document chunks.
 
-# The system prompt tells Claude HOW to behave
-# We instruct it to:
-#   1. Only use the provided context
-#   2. Be honest when it doesn't know
-#   3. Be concise and clear
-SYSTEM_PROMPT = """You are a helpful, friendly assistant. You can chat naturally and also answer questions about documents the user has uploaded.
+IMPORTANT RULES:
+- ONLY use information from the provided context chunks
+- If the question cannot be answered from chunks, respond exactly: "I couldn't find that information in your uploaded documents."
+- Do NOT use general knowledge, personal opinions, or external information
+- Do NOT fabricate or hallucinate information
+- Quote relevant chunks when possible
+- Keep responses concise and factual"""
 
-Rules:
-- For greetings, casual conversation, or general knowledge questions, respond naturally and helpfully — you are not limited to documents for these
-- When context chunks are provided, use them to give accurate, detailed answers about the user's documents
-- If a document question cannot be answered from the provided chunks, say "I couldn't find that in your uploaded documents"
-- Never fabricate information from documents — only use what is in the provided chunks
-- Keep responses concise and clear"""
-
-
-# ── Build the prompt ──────────────────────────────────────────────────────────
+# ── Build Mistral prompt ─────────────────────────────────────────────────────
 
 def _build_prompt(question: str, chunks: List[Dict]) -> str:
-    """
-    Builds the full prompt we send to Claude.
-
-    Format:
-        Context:
-        [Chunk 1 - Page 3]
-        text of chunk 1...
-
-        [Chunk 2 - Page 7]
-        text of chunk 2...
-
-        Question: What does Sun Tzu say about deception?
+    """Builds Mistral chat template with context chunks."""
+    if not chunks:
+        return f"<s>[INST] {question} [/INST]"
     
-    Why format it this way?
-    Claude performs better when context is clearly
-    separated from the question.
-    """
-    # Build context section from chunks
+    # Format chunks clearly
     context_parts = []
-    for i, chunk in enumerate(chunks, start=1):
-        page    = chunk.get("page_number", "?")
-        doc     = chunk.get("doc_id", "unknown")
-        score   = chunk.get("rerank_score", chunk.get("similarity_score", 0))
-        text    = chunk.get("text", "")
-
-        context_parts.append(
-            f"[Chunk {i} — {doc} | Page {page} | Score {score}]\n{text}"
-        )
-
+    for i, chunk in enumerate(chunks, 1):
+        page = chunk.get("page_number", "?")
+        doc = chunk.get("doc_id", "unknown")
+        score = chunk.get("rerank_score", chunk.get("similarity_score", 0))
+        text = chunk.get("text", "")
+        context_parts.append(f"### Chunk {i} ({doc}, Page {page}, Score: {score:.2f})\n{text}")
+    
     context = "\n\n".join(context_parts)
+    
+    prompt = f"""<s>[INST] <<SYS>>
+{SYSTEM_INSTRUCTIONS}
 
-    return f"""Context:
+Context:
 {context}
+<</SYS>>
 
-Question: {question}
+Question: {question} [/INST]"""
+    
+    return prompt
 
-Answer based only on the context above:"""
-
-
-# ── Call Claude Haiku ─────────────────────────────────────────────────────────
+# ── Call Mistral Mixtral ──────────────────────────────────────────────────────
 
 async def generate_answer(
-    question      : str,
-    chunks        : List[Dict],
-    chat_history  : List[Dict] = None,
+    question: str,
+    chunks: List[Dict],
+    chat_history: List[Dict] = None,
 ) -> str:
-    """
-    Sends the question + chunks to Claude Haiku and returns the answer.
-
-    Parameters
-    ----------
-    question     : the user's question
-    chunks       : reranked chunks from retriever.py
-    chat_history : previous messages in this session
-                   format: [{"role": "user", "content": "..."},
-                            {"role": "assistant", "content": "..."}]
-
-    Returns
-    -------
-    Claude's answer as a string
-    """
+    """Sends question + chunks to Mistral and returns grounded answer."""
     client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
-
-    current_prompt = _build_prompt(question, chunks)if chunks else question
-
-    # Build messages list including chat history
-    messages = []
-    if chat_history:
-        for msg in chat_history[-6:]:
-            messages.append({
-                "role"   : msg["role"],
-                "content": [{"text": msg["content"]}],
-            })
-
-    messages.append({
-        "role"   : "user",
-        "content": [{"text": current_prompt}],
-    })
-
-    # Nova request format (official AWS docs format)
+    
+    # Build Mistral native prompt
+    prompt = _build_prompt(question, chunks)
+    
+    # Mistral native request format
     body = json.dumps({
-        "schemaVersion"   : "messages-v1",
-        "messages"        : messages,
-        "system"          : [{"text": SYSTEM_PROMPT}],
-        "inferenceConfig" : {
-            "maxTokens"  : MAX_TOKENS,
-            "temperature": 0.7,
-            "topP"       : 0.9,
-        }
+        "prompt": prompt,
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.1,  # Low for grounded answers
+        "top_p": 0.9
     })
-
+    
     try:
         response = client.invoke_model(
-            modelId     = CLAUDE_MODEL_ID,
-            body        = body,
-            contentType = "application/json",
-            accept      = "application/json",
+            modelId=MODEL_ID,
+            body=body,
+            contentType="application/json",
+            accept="application/json",
         )
+        
+        response_body = json.loads(response["body"].read())
+        answer = response_body["outputs"][0]["text"].strip()
+        
     except Exception as e:
-        print(f"[llm] ❌ invoke_model error: {type(e).__name__}: {str(e)}")
-        raise
-
-    response_body = json.loads(response["body"].read())
-    answer        = response_body["output"]["message"]["content"][0]["text"]
-
+        print(f"[llm] ❌ Mistral error: {type(e).__name__}: {str(e)}")
+        answer = "I couldn't process your request right now. Please try again."
+    
     print(f"[llm] generated answer ({len(answer)} chars)")
     return answer
-
 
 # ── Format final response ─────────────────────────────────────────────────────
 
 def build_response(answer: str, sources: List[Dict]) -> Dict:
-    """
-    Builds the final response object returned to the user.
-
-    Format:
-    {
-        "answer": "Sun Tzu believed deception was...",
-        "sources": [
-            {
-                "chunk_id"   : "ArtOfWar::chunk_0042",
-                "display"    : "ArtOfWar.pdf | Page 3 | Score: 0.89",
-                "text"       : "All warfare is based on deception...",
-                "pdf_title"  : "ArtOfWar.pdf",
-                "page_number": 3,
-                "score"      : 0.89
-            }
-        ]
-    }
-
-    The frontend uses:
-        display  → text shown on the hyperlink
-        text     → exact chunk content shown in popup when clicked
-        chunk_id → unique identifier for this chunk
-    """
+    """Builds final response with answer + source citations."""
     return {
-        "answer" : answer,
+        "answer": answer,
         "sources": [
             {
-                "chunk_id"   : source["chunk_id"],
-                "display"    : source["display"],
-                "text"       : source["text"],       # ← exact chunk text
-                "pdf_title"  : source["pdf_title"],
+                "chunk_id": source["chunk_id"],
+                "display": source["display"],
+                "text": source["text"],
+                "pdf_title": source["pdf_title"],
                 "page_number": source["page_number"],
-                "score"      : source["score"],
+                "score": source["score"],
             }
             for source in sources
         ],
