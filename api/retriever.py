@@ -179,7 +179,7 @@ def build_sources(chunks: List[Dict]) -> List[Dict]:
         metadata  = chunk.get("metadata", {})
         pdf_title = metadata.get("source", chunk["doc_id"])
         page_num  = chunk.get("page_number", "?")
-        score     = round(chunk.get("similarity_score", 0), 4)
+        score     = round(chunk.get("rerank_score",chunk.get("similarity_score",0)), 4)
 
         sources.append({
             "chunk_id"   : chunk["chunk_id"],
@@ -213,6 +213,12 @@ async def retrieve(question: str, user_id: str, session_id: str) -> Dict:
 
     if not chunks:
         return {"chunks": [], "sources": []}
+    
+    try:
+        chunks = rerank(question, chunks)
+
+    except Exception as e:
+        print(f"[retriever] Rerank failed (using vector search): {e}")
 
     # 3. Build sources
     sources = build_sources(chunks)
