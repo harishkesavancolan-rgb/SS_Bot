@@ -4,8 +4,8 @@ tests/test_llm.py
 Tests for api/llm.py — Bedrock is MOCKED.
 
 What we're checking:
-  - generate_answer() calls Claude Haiku
-  - Chat history is included in messages
+  - generate_answer() calls Mistral Mixtral 8x7B
+  - _build_prompt() formats Mistral chat template correctly
   - build_response() formats correctly
   - Response contains answer + sources with correct fields
 """
@@ -19,6 +19,7 @@ from api.llm import generate_answer, build_response, _build_prompt
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _make_fake_chunk(chunk_id="doc::chunk_0001"):
     return {
         "chunk_id"    : chunk_id,
@@ -30,11 +31,11 @@ def _make_fake_chunk(chunk_id="doc::chunk_0001"):
     }
 
 
-def _make_fake_claude_response(answer: str):
-    """Mimics boto3 Amazon Nova response."""
+def _make_fake_mistral_response(answer: str):
+    """Mimics boto3 Mistral Mixtral response format."""
     body = MagicMock()
     body.read.return_value = json.dumps({
-        "output": {"message": {"content": [{"text": answer}]}}
+        "outputs": [{"text": answer}]
     }).encode("utf-8")
     return {"body": body}
 
@@ -51,6 +52,7 @@ def _make_fake_source():
 
 
 # ── Test: _build_prompt() ─────────────────────────────────────────────────────
+
 
 class TestBuildPrompt:
 
@@ -79,8 +81,31 @@ class TestBuildPrompt:
         assert "Chunk 1" in prompt
         assert "Chunk 2" in prompt
 
+    def test_uses_mistral_inst_template(self):
+        """Prompt must use Mistral [INST] chat template."""
+        prompt = _build_prompt("test", [_make_fake_chunk()])
+        assert "[INST]" in prompt
+        assert "[/INST]" in prompt
+
+    def test_empty_chunks_returns_basic_prompt(self):
+        """With no chunks, prompt must still be valid Mistral format."""
+        prompt = _build_prompt("What is deception?", [])
+        assert "[INST]" in prompt
+        assert "What is deception?" in prompt
+
+    def test_includes_doc_id(self):
+        """Prompt must include the doc_id for traceability."""
+        prompt = _build_prompt("test", [_make_fake_chunk()])
+        assert "ArtOfWar" in prompt
+
+    def test_includes_rerank_score(self):
+        """Prompt must include the chunk relevance score."""
+        prompt = _build_prompt("test", [_make_fake_chunk()])
+        assert "0.89" in prompt
+
 
 # ── Test: generate_answer() ───────────────────────────────────────────────────
+
 
 class TestGenerateAnswer:
 
@@ -90,7 +115,7 @@ class TestGenerateAnswer:
         """generate_answer() must return a string."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_claude_response(
+        mock_client.invoke_model.return_value = _make_fake_mistral_response(
             "Deception is fundamental to warfare."
         )
 
@@ -101,37 +126,56 @@ class TestGenerateAnswer:
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
-    async def test_calls_claude_haiku(self, mock_boto3):
-        """generate_answer() must use Claude 3 Haiku model."""
+    async def test_calls_mistral_mixtral(self, mock_boto3):
+        """generate_answer() must use Mistral Mixtral 8x7B model."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_claude_response("answer")
+        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
 
         await generate_answer("test", [_make_fake_chunk()])
 
         call_kwargs = mock_client.invoke_model.call_args.kwargs
-        assert "nova" in call_kwargs["modelId"].lower()
+        assert call_kwargs["modelId"] == "mistral.mixtral-8x7b-v1:0"
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
-    async def test_includes_chat_history(self, mock_boto3):
-        """Chat history must be included in prompt sent to Titan."""
+    async def test_sends_native_prompt_format(self, mock_boto3):
+        """Request body must use Mistral native prompt format, not messages."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_claude_response("answer")
+        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
 
-        history = [
-            {"role": "user",      "content": "previous question"},
-            {"role": "assistant", "content": "previous answer"},
-        ]
-
-        await generate_answer("follow up question", [_make_fake_chunk()], history)
+        await generate_answer("test", [_make_fake_chunk()])
 
         body = json.loads(mock_client.invoke_model.call_args.kwargs["body"])
-        # Nova uses messages format — check history is included
-        roles = [m["role"] for m in body["messages"]]
-        assert "user"      in roles
-        assert "assistant" in roles
+        assert "prompt" in body
+        assert "messages" not in body
+
+    @pytest.mark.asyncio
+    @patch("api.llm.boto3.client")
+    async def test_prompt_contains_question(self, mock_boto3):
+        """The prompt sent to Mistral must contain the user's question."""
+        mock_client = MagicMock()
+        mock_boto3.return_value = mock_client
+        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
+
+        await generate_answer("What is the speed of light?", [_make_fake_chunk()])
+
+        body = json.loads(mock_client.invoke_model.call_args.kwargs["body"])
+        assert "What is the speed of light?" in body["prompt"]
+
+    @pytest.mark.asyncio
+    @patch("api.llm.boto3.client")
+    async def test_uses_low_temperature(self, mock_boto3):
+        """Temperature must be low (≤ 0.2) for grounded, factual answers."""
+        mock_client = MagicMock()
+        mock_boto3.return_value = mock_client
+        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
+
+        await generate_answer("test", [_make_fake_chunk()])
+
+        body = json.loads(mock_client.invoke_model.call_args.kwargs["body"])
+        assert body["temperature"] <= 0.2
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
@@ -139,14 +183,42 @@ class TestGenerateAnswer:
         """generate_answer() must work fine with no chat history."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_claude_response("answer")
+        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
 
         result = await generate_answer("test", [_make_fake_chunk()], None)
 
         assert isinstance(result, str)
 
+    @pytest.mark.asyncio
+    @patch("api.llm.boto3.client")
+    async def test_graceful_error_handling(self, mock_boto3):
+        """generate_answer() must return a fallback string on Bedrock error."""
+        mock_client = MagicMock()
+        mock_boto3.return_value = mock_client
+        mock_client.invoke_model.side_effect = Exception("Bedrock unavailable")
+
+        result = await generate_answer("test", [_make_fake_chunk()])
+
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    @pytest.mark.asyncio
+    @patch("api.llm.boto3.client")
+    async def test_sets_correct_content_type(self, mock_boto3):
+        """invoke_model must be called with JSON content type headers."""
+        mock_client = MagicMock()
+        mock_boto3.return_value = mock_client
+        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
+
+        await generate_answer("test", [_make_fake_chunk()])
+
+        call_kwargs = mock_client.invoke_model.call_args.kwargs
+        assert call_kwargs["contentType"] == "application/json"
+        assert call_kwargs["accept"] == "application/json"
+
 
 # ── Test: build_response() ────────────────────────────────────────────────────
+
 
 class TestBuildResponse:
 
@@ -163,7 +235,7 @@ class TestBuildResponse:
         assert response["answer"] == "exact answer text"
 
     def test_source_has_required_fields(self):
-        """Each source must have chunk_id, display, text, score."""
+        """Each source must have chunk_id, display, text, score, page_number."""
         response = build_response("answer", [_make_fake_source()])
         source   = response["sources"][0]
 
@@ -173,7 +245,23 @@ class TestBuildResponse:
         assert "score"       in source
         assert "page_number" in source
 
+    def test_source_has_pdf_title(self):
+        """Each source must include pdf_title for provenance."""
+        response = build_response("answer", [_make_fake_source()])
+        assert "pdf_title" in response["sources"][0]
+
     def test_source_has_no_s3_link(self):
         """Sources must not contain S3 links to whole PDFs."""
         response = build_response("answer", [_make_fake_source()])
         assert "link" not in response["sources"][0]
+
+    def test_multiple_sources_all_included(self):
+        """All sources passed in must appear in the response."""
+        sources = [_make_fake_source(), _make_fake_source()]
+        response = build_response("answer", sources)
+        assert len(response["sources"]) == 2
+
+    def test_empty_sources_returns_empty_list(self):
+        """build_response() must handle zero sources without error."""
+        response = build_response("answer", [])
+        assert response["sources"] == []
