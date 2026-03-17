@@ -17,7 +17,16 @@ Session isolation:
 """
 
 import os
-os.environ["HF_HOME"] = "/app/hf_cache"
+
+# Use /app/hf_cache inside Docker (Lambda)
+# Fall back to /tmp/hf_cache locally for tests
+# /app doesn't exist outside Docker so we check if it's writable
+if os.path.isdir("/app") and os.access("/app", os.W_OK):
+    HF_CACHE = "/app/hf_cache"
+else:
+    HF_CACHE = "/tmp/hf_cache"
+
+os.environ["HF_HOME"] = HF_CACHE
 
 # Must be set BEFORE importing sentence_transformers
 # HuggingFace reads this env var at import time to decide where to cache models
