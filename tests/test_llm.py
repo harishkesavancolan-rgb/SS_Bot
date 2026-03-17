@@ -4,8 +4,8 @@ tests/test_llm.py
 Tests for api/llm.py — Bedrock is MOCKED.
 
 What we're checking:
-  - generate_answer() calls Mistral Mixtral 8x7B
-  - _build_prompt() formats Mistral chat template correctly
+  - generate_answer() calls Llama 3.1 8B Instruct
+  - _build_prompt() formats Llama 3 chat template correctly
   - build_response() formats correctly
   - Response contains answer + sources with correct fields
 """
@@ -31,12 +31,13 @@ def _make_fake_chunk(chunk_id="doc::chunk_0001"):
     }
 
 
-def _make_fake_mistral_response(answer: str):
-    """Mimics boto3 Mistral Mixtral response format."""
+def _make_fake_llama_response(answer: str):
+    """Mimics boto3 Llama 3 response format.
+    body.read() returns raw bytes — llm.py calls .decode('utf-8') before json.loads,
+    matching the real boto3 StreamingBody contract from the reference implementation.
+    """
     body = MagicMock()
-    body.read.return_value = json.dumps({
-        "outputs": [{"text": answer}]
-    }).encode("utf-8")
+    body.read.return_value = json.dumps({"generation": answer}).encode("utf-8")
     return {"body": body}
 
 
@@ -81,16 +82,28 @@ class TestBuildPrompt:
         assert "Chunk 1" in prompt
         assert "Chunk 2" in prompt
 
-    def test_uses_mistral_inst_template(self):
-        """Prompt must use Mistral [INST] chat template."""
+    def test_uses_llama3_chat_template(self):
+        """Prompt must use Llama 3 header/eot chat template tokens."""
         prompt = _build_prompt("test", [_make_fake_chunk()])
-        assert "[INST]" in prompt
-        assert "[/INST]" in prompt
+        assert "<|start_header_id|>" in prompt
+        assert "<|end_header_id|>" in prompt
+        assert "<|eot_id|>" in prompt
+
+    def test_includes_begin_of_text_token(self):
+        """Prompt must start with Llama 3 BOS token."""
+        prompt = _build_prompt("test", [_make_fake_chunk()])
+        assert prompt.startswith("<|begin_of_text|>")
+
+    def test_has_system_and_user_roles(self):
+        """Prompt must contain both system and user role headers."""
+        prompt = _build_prompt("test", [_make_fake_chunk()])
+        assert "system" in prompt
+        assert "user" in prompt
 
     def test_empty_chunks_returns_basic_prompt(self):
-        """With no chunks, prompt must still be valid Mistral format."""
+        """With no chunks, prompt must still be valid Llama 3 format."""
         prompt = _build_prompt("What is deception?", [])
-        assert "[INST]" in prompt
+        assert "<|begin_of_text|>" in prompt
         assert "What is deception?" in prompt
 
     def test_includes_doc_id(self):
@@ -115,7 +128,7 @@ class TestGenerateAnswer:
         """generate_answer() must return a string."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_mistral_response(
+        mock_client.invoke_model.return_value = _make_fake_llama_response(
             "Deception is fundamental to warfare."
         )
 
@@ -126,24 +139,24 @@ class TestGenerateAnswer:
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
-    async def test_calls_mistral_mixtral(self, mock_boto3):
-        """generate_answer() must use Mistral Mixtral 8x7B model."""
+    async def test_calls_llama_8b(self, mock_boto3):
+        """generate_answer() must use Llama 3.1 8B Instruct model."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
+        mock_client.invoke_model.return_value = _make_fake_llama_response("answer")
 
         await generate_answer("test", [_make_fake_chunk()])
 
         call_kwargs = mock_client.invoke_model.call_args.kwargs
-        assert call_kwargs["modelId"] == "mistral.mixtral-8x7b-v1:0"
+        assert call_kwargs["modelId"] == "meta.llama3-1-8b-instruct-v1:0"
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
     async def test_sends_native_prompt_format(self, mock_boto3):
-        """Request body must use Mistral native prompt format, not messages."""
+        """Request body must use Llama native prompt format, not messages."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
+        mock_client.invoke_model.return_value = _make_fake_llama_response("answer")
 
         await generate_answer("test", [_make_fake_chunk()])
 
@@ -153,11 +166,25 @@ class TestGenerateAnswer:
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
-    async def test_prompt_contains_question(self, mock_boto3):
-        """The prompt sent to Mistral must contain the user's question."""
+    async def test_uses_max_gen_len(self, mock_boto3):
+        """Request body must use max_gen_len (Llama param, not max_tokens)."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
+        mock_client.invoke_model.return_value = _make_fake_llama_response("answer")
+
+        await generate_answer("test", [_make_fake_chunk()])
+
+        body = json.loads(mock_client.invoke_model.call_args.kwargs["body"])
+        assert "max_gen_len" in body
+        assert "max_tokens" not in body
+
+    @pytest.mark.asyncio
+    @patch("api.llm.boto3.client")
+    async def test_prompt_contains_question(self, mock_boto3):
+        """The prompt sent to Llama must contain the user's question."""
+        mock_client = MagicMock()
+        mock_boto3.return_value = mock_client
+        mock_client.invoke_model.return_value = _make_fake_llama_response("answer")
 
         await generate_answer("What is the speed of light?", [_make_fake_chunk()])
 
@@ -170,7 +197,7 @@ class TestGenerateAnswer:
         """Temperature must be low (≤ 0.2) for grounded, factual answers."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
+        mock_client.invoke_model.return_value = _make_fake_llama_response("answer")
 
         await generate_answer("test", [_make_fake_chunk()])
 
@@ -183,7 +210,7 @@ class TestGenerateAnswer:
         """generate_answer() must work fine with no chat history."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
+        mock_client.invoke_model.return_value = _make_fake_llama_response("answer")
 
         result = await generate_answer("test", [_make_fake_chunk()], None)
 
@@ -208,7 +235,7 @@ class TestGenerateAnswer:
         """invoke_model must be called with JSON content type headers."""
         mock_client = MagicMock()
         mock_boto3.return_value = mock_client
-        mock_client.invoke_model.return_value = _make_fake_mistral_response("answer")
+        mock_client.invoke_model.return_value = _make_fake_llama_response("answer")
 
         await generate_answer("test", [_make_fake_chunk()])
 
