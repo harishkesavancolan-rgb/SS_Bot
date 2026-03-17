@@ -29,6 +29,8 @@ MIN_SIMILARITY_SCORE = 0.2
 EMBEDDING_DIM        = 1024
 VECTOR_SEARCH_TOP_K  = 5
 RERANK_TOP_N         = 5
+
+
 RERANK      = "amazon.rerank-v1:0"
 RERANK_REGION = "us-west-2" 
 TITAN_MODEL_ID       = "amazon.titan-embed-text-v2:0"
@@ -130,7 +132,7 @@ def rerank(
                     "modelConfiguration": {
                         "modelArn": f"arn:aws:bedrock:{RERANK_REGION}::foundation-model/{RERANK}"
                     },
-                    "numberOfResults": top_n,
+                    "numberOfResults": min(top_n, len(chunks)),
                 }
             },
             sources=[
