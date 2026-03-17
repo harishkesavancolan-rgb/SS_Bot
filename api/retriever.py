@@ -29,7 +29,7 @@ MIN_SIMILARITY_SCORE = 0.2
 EMBEDDING_DIM        = 1024
 VECTOR_SEARCH_TOP_K  = 5
 RERANK_TOP_N         = 5
-RERANK      = "amazon.rerank-1-0:0"
+RERANK      = "us.amazon.rerank-v1:0"
 TITAN_MODEL_ID       = "amazon.titan-embed-text-v2:0"
 AWS_REGION           = os.environ.get("AWS_REGION", "us-east-1")
 
