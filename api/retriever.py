@@ -29,7 +29,8 @@ MIN_SIMILARITY_SCORE = 0.2
 EMBEDDING_DIM        = 1024
 VECTOR_SEARCH_TOP_K  = 5
 RERANK_TOP_N         = 5
-RERANK      = "us.amazon.rerank-v1:0"
+RERANK      = "amazon.rerank-v1:0"
+RERANK_REGION = "us-west-2" 
 TITAN_MODEL_ID       = "amazon.titan-embed-text-v2:0"
 AWS_REGION           = os.environ.get("AWS_REGION", "us-east-1")
 
@@ -119,7 +120,7 @@ def rerank(
     if not chunks:
         return []
 
-    client = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
+    client = boto3.client("bedrock-agent-runtime", region_name=RERANK_REGION)
 
     try:
         response = client.rerank(
@@ -127,7 +128,7 @@ def rerank(
                 "type": "BEDROCK_RERANKING_MODEL",
                 "bedrockRerankingConfiguration": {
                     "modelConfiguration": {
-                        "modelArn": f"arn:aws:bedrock:{AWS_REGION}::foundation-model/{RERANK}"
+                        "modelArn": f"arn:aws:bedrock:{RERANK_REGION}::foundation-model/{RERANK}"
                     },
                     "numberOfResults": top_n,
                 }
