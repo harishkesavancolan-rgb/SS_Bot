@@ -16,7 +16,14 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy both api/ and ingestion/ 
+# Download the cross-encoder model at build time and bake it into the image
+# This means Lambda containers start with the model already on disk
+# No download on cold start → no timeout
+# Model is saved to /app/hf_cache which is part of the image filesystem
+ENV TRANSFORMERS_CACHE=/app/hf_cache
+RUN python -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
+
+# Copy both api/ and ingestion/
 # api/ needs ingestion/store.py for DB connection
 COPY ingestion/ ./ingestion/
 COPY api/       ./api/
