@@ -22,6 +22,7 @@ import boto3
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from typing import List, Dict
+from sentence_transformers import CrossEncoder
 
 MIN_SIMILARITY_SCORE = 0.2
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -29,10 +30,10 @@ MIN_SIMILARITY_SCORE = 0.2
 EMBEDDING_DIM        = 1024
 VECTOR_SEARCH_TOP_K  = 5
 RERANK_TOP_N         = 5
+import os
+os.environ["TRANSFORMERS_CACHE"] = "/tmp/hf_cache"
 
-
-RERANK      = "amazon.rerank-v1:0"
-RERANK_REGION = "us-west-2" 
+_RERANKER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 TITAN_MODEL_ID       = "amazon.titan-embed-text-v2:0"
 AWS_REGION           = os.environ.get("AWS_REGION", "us-east-1")
 
@@ -108,60 +109,29 @@ def vector_search(question_vector, user_id, session_id, top_k=VECTOR_SEARCH_TOP_
 
 # ── Step 3: Rerank with Cohere ────────────────────────────────────────────────
 
-def rerank(
-    question : str,
-    chunks   : List[Dict],
-    top_n    : int = RERANK_TOP_N,
-) -> List[Dict]:
-    """
-    Reranks chunks using Cohere Rerank 3.5 via bedrock-agent-runtime.
-
-    Uses the dedicated rerank() API — NOT invoke_model().
-    Cohere Rerank requires bedrock-agent-runtime client.
-    """
+def rerank(question: str, chunks: List[Dict], top_n: int = RERANK_TOP_N) -> List[Dict]:
     if not chunks:
         return []
 
-    client = boto3.client("bedrock-agent-runtime", region_name=RERANK_REGION)
+    # Pair question with each chunk text
+    pairs = [(question, chunk["text"]) for chunk in chunks]
 
-    try:
-        response = client.rerank(
-            rerankingConfiguration={
-                "type": "BEDROCK_RERANKING_MODEL",
-                "bedrockRerankingConfiguration": {
-                    "modelConfiguration": {
-                        "modelArn": f"arn:aws:bedrock:{RERANK_REGION}::foundation-model/{RERANK}"
-                    },
-                    "numberOfResults": min(top_n, len(chunks)),
-                }
-            },
-            sources=[
-                {
-                    "type"              : "INLINE",
-                    "inlineDocumentSource": {
-                        "type"         : "TEXT",
-                        "textDocument" : {"text": chunk["text"]},
-                    }
-                }
-                for chunk in chunks
-            ],
-            queries=[
-                {"type": "TEXT", "textQuery": {"text": question}}
-            ],
-        )
-    except Exception as e:
-        print(f"[retriever] ❌ rerank error: {type(e).__name__}: {str(e)}")
-        raise
+    # Score all pairs in one pass — no API call, runs locally
+    scores = _RERANKER.predict(pairs)
 
-    reranked_chunks = []
-    for result in response["results"]:
-        chunk = chunks[result["index"]].copy()
-        chunk["rerank_score"]     = round(result["relevanceScore"], 4)
-        chunk["similarity_score"] = round(chunk["similarity_score"], 4)
-        reranked_chunks.append(chunk)
+    # Attach score to each chunk
+    for chunk, score in zip(chunks, scores):
+        chunk["rerank_score"] = round(float(score), 4)
 
-    print(f"[retriever] reranking kept top {len(reranked_chunks)} chunks")
-    return reranked_chunks
+    # Sort by score descending, keep top_n
+    reranked = sorted(chunks, key=lambda c: c["rerank_score"], reverse=True)
+    reranked = reranked[:top_n]
+
+    print(f"[retriever] reranking kept top {len(reranked)} chunks")
+    return reranked
+
+
+
 
 
 # ── Step 4: Build source hyperlinks ──────────────────────────────────────────

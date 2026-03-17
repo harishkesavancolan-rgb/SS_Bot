@@ -17,3 +17,5 @@ python-multipart>=0.0.9             #needed for fast api
 pytest>=7.0.0                       # test runner
 pytest-asyncio>=0.23.0              # async test support
 httpx>=0.27.0                       # test FastAPI endpoints
+
+sentence-transformers
