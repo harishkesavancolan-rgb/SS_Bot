@@ -148,7 +148,7 @@ class TestGenerateAnswer:
         await generate_answer("test", [_make_fake_chunk()])
 
         call_kwargs = mock_client.invoke_model.call_args.kwargs
-        assert call_kwargs["modelId"] == "meta.llama3-1-8b-instruct-v1:0"
+        assert call_kwargs["modelId"] == "us.meta.llama3-1-8b-instruct-v1:0"
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
