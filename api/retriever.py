@@ -17,11 +17,12 @@ Session isolation:
 """
 
 import os
+os.environ["HF_HOME"] = "/app/hf_cache"
 
 # Must be set BEFORE importing sentence_transformers
 # HuggingFace reads this env var at import time to decide where to cache models
 # /app/hf_cache is baked into the Docker image at build time — no download on cold start
-os.environ["TRANSFORMERS_CACHE"] = "/app/hf_cache"
+
 
 import json
 import boto3
