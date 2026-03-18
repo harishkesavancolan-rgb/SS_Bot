@@ -4,18 +4,32 @@ tests/test_chat.py
 Tests for api/chat.py — FastAPI endpoints.
 
 What we're checking:
-  - GET  /           → health check returns 200
+  - GET  /             → health check returns 200
   - POST /sessions/new → creates session with ID
-  - POST /chat        → returns answer + sources
-  - GET  /sessions    → lists user sessions
-  - POST /upload      → rejects non-PDF, requires session_id
+  - POST /chat         → returns answer + sources
+  - GET  /sessions     → lists user sessions
+  - POST /upload       → rejects non-PDF, requires session_id
 """
 
+import sys
 import pytest
 import pytest_asyncio
-from httpx             import AsyncClient, ASGITransport
-from unittest.mock     import patch, MagicMock, AsyncMock
+from httpx         import AsyncClient, ASGITransport
+from unittest.mock import patch, MagicMock, AsyncMock
 
+# ── Mock sentence_transformers BEFORE importing api.chat ─────────────────────
+# api.chat imports api.retriever which loads CrossEncoder at import time.
+# Mocking here prevents the model download from running during tests.
+_mock_reranker_instance = MagicMock()
+_mock_reranker_instance.predict.return_value = [0.9, 0.7, 0.5, 0.3, 0.1]
+
+_mock_cross_encoder_class = MagicMock(return_value=_mock_reranker_instance)
+
+sys.modules["sentence_transformers"] = MagicMock(
+    CrossEncoder=_mock_cross_encoder_class
+)
+
+# Now safe to import app
 from api.chat import app
 
 
@@ -121,29 +135,9 @@ class TestChat:
 
     @pytest.mark.asyncio
     @patch("api.chat.retrieve")
+    @patch("api.chat.generate_answer")
     @patch("api.chat.get_session_history")
-    async def test_retrieve_called_with_session_id(self, mock_history, mock_retrieve):
-        """POST /chat must pass session_id to retrieve() for isolation."""
-        mock_history.return_value  = []
-        mock_retrieve.return_value = {"chunks": [], "sources": []}
-
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
-            await client.post("/chat", json={
-                "question"  : "What is deception?",
-                "user_id"   : "user_123",
-                "session_id": "session_abc",
-            })
-
-        # Verify session_id was passed to retrieve
-        call_kwargs = mock_retrieve.call_args.kwargs
-        assert call_kwargs.get("session_id") == "session_abc"
-    @pytest.mark.asyncio
-    @patch("api.chat.retrieve")
-    @patch("api.chat.generate_answer")    # ← add this
-    @patch("api.chat.get_session_history")
-    @patch("api.chat.save_message")       # ← add this
+    @patch("api.chat.save_message")
     async def test_retrieve_called_with_session_id(
         self, mock_save, mock_history, mock_generate, mock_retrieve
     ):
@@ -163,6 +157,33 @@ class TestChat:
 
         call_kwargs = mock_retrieve.call_args.kwargs
         assert call_kwargs.get("session_id") == "session_abc"
+
+    @pytest.mark.asyncio
+    @patch("api.chat.retrieve")
+    @patch("api.chat.generate_answer")
+    @patch("api.chat.get_session_history")
+    @patch("api.chat.save_message")
+    async def test_returns_answer_when_no_chunks(
+        self, mock_save, mock_history, mock_generate, mock_retrieve
+    ):
+        """POST /chat must return 200 even when no chunks found (casual chat)."""
+        mock_history.return_value  = []
+        mock_retrieve.return_value = {"chunks": [], "sources": []}
+        mock_generate.return_value = "Hello! How can I help you?"
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post("/chat", json={
+                "question"  : "hi",
+                "user_id"   : "user_123",
+                "session_id": "session_abc",
+            })
+
+        assert response.status_code == 200
+        assert response.json()["sources"] == []
+
+
 # ── Test: POST /upload ────────────────────────────────────────────────────────
 
 class TestUpload:
@@ -213,9 +234,8 @@ class TestUpload:
                 files={"file": ("test.pdf", b"%PDF-1.4 content", "application/pdf")},
             )
 
-        # S3 key must contain both user_id and session_id
         call_args = mock_s3.upload_fileobj.call_args
-        s3_key    = call_args[0][2]   # third positional arg is the key
+        s3_key    = call_args[0][2]
         assert "user_123"    in s3_key
         assert "session_abc" in s3_key
         assert "test.pdf"    in s3_key
@@ -227,8 +247,8 @@ class TestUpload:
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.post(
-                "/upload?user_id=user_123",   # no session_id
+                "/upload?user_id=user_123",
                 files={"file": ("test.pdf", b"%PDF-1.4 content", "application/pdf")},
             )
 
-        assert response.status_code == 422   # FastAPI validation error
+        assert response.status_code == 422

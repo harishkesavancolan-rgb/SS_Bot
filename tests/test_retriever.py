@@ -1,20 +1,35 @@
 """
 tests/test_retriever.py
 ------------------------
-Tests for api/retriever.py — all AWS and DB calls are MOCKED.
+Tests for api/retriever.py — all AWS, DB, and ML model calls are MOCKED.
 
 What we're checking:
   - embed_question() returns a 1024-dim vector
   - vector_search() filters by both user_id AND session_id
-  - rerank() calls Cohere and reorders chunks
+  - rerank() reorders chunks using local cross-encoder
   - build_sources() builds correct source objects
   - retrieve() passes session_id through the pipeline
 """
 
+import sys
 import json
 import pytest
 from unittest.mock import patch, MagicMock
 
+# ── Mock sentence_transformers BEFORE importing api.retriever ─────────────────
+# CrossEncoder loads an ~80MB model at import time.
+# We must mock the entire module before retriever.py is imported,
+# otherwise the model tries to download and the test crashes.
+_mock_reranker_instance = MagicMock()
+_mock_reranker_instance.predict.return_value = [0.9, 0.7, 0.5, 0.3, 0.1]
+
+_mock_cross_encoder_class = MagicMock(return_value=_mock_reranker_instance)
+
+sys.modules["sentence_transformers"] = MagicMock(
+    CrossEncoder=_mock_cross_encoder_class
+)
+
+# Now safe to import retriever
 from api.retriever import (
     embed_question,
     vector_search,
@@ -149,35 +164,20 @@ class TestVectorSearch:
 
 
 # ── Test: rerank() ────────────────────────────────────────────────────────────
+# rerank() now uses a local CrossEncoder — no boto3/AWS calls
+# The model is mocked via sys.modules at the top of this file
 
 class TestRerank:
 
-    @patch("api.retriever.boto3.client")
-    def test_returns_top_n_chunks(self, mock_boto3):
-        """rerank() should return at most RERANK_TOP_N chunks."""
-        mock_client = MagicMock()
-        mock_boto3.return_value = mock_client
-        mock_client.rerank.return_value = {
-            "results": [
-                {"index": 0, "relevanceScore": 0.95},
-                {"index": 1, "relevanceScore": 0.87},
-            ]
-        }
-
+    def test_returns_top_n_chunks(self):
+        """rerank() should return at most top_n chunks."""
         chunks  = [_make_fake_chunk(f"doc::chunk_{i:04d}") for i in range(5)]
         results = rerank("What is deception?", chunks, top_n=2)
 
         assert len(results) == 2
 
-    @patch("api.retriever.boto3.client")
-    def test_adds_rerank_score(self, mock_boto3):
+    def test_adds_rerank_score(self):
         """Each reranked chunk must have a rerank_score field."""
-        mock_client = MagicMock()
-        mock_boto3.return_value = mock_client
-        mock_client.rerank.return_value = {
-            "results": [{"index": 0, "relevanceScore": 0.95}]
-        }
-
         chunks  = [_make_fake_chunk()]
         results = rerank("test", chunks, top_n=1)
 
@@ -186,7 +186,23 @@ class TestRerank:
     def test_empty_chunks_returns_empty(self):
         """rerank() with empty input should return empty list."""
         results = rerank("test", [])
+
         assert results == []
+
+    def test_sorted_by_score_descending(self):
+        """rerank() must return chunks sorted by rerank_score highest first."""
+        chunks  = [_make_fake_chunk(f"doc::chunk_{i:04d}") for i in range(5)]
+        results = rerank("test", chunks, top_n=5)
+        scores  = [r["rerank_score"] for r in results]
+
+        assert scores == sorted(scores, reverse=True)
+
+    def test_fewer_chunks_than_top_n(self):
+        """rerank() with fewer chunks than top_n must return all chunks safely."""
+        chunks  = [_make_fake_chunk("doc::chunk_0001"), _make_fake_chunk("doc::chunk_0002")]
+        results = rerank("test", chunks, top_n=5)
+
+        assert len(results) == 2
 
 
 # ── Test: build_sources() ─────────────────────────────────────────────────────
@@ -206,8 +222,8 @@ class TestBuildSources:
         chunks  = [_make_fake_chunk(page=3, score=0.89)]
         sources = build_sources(chunks)
 
-        assert "Page 3"  in sources[0]["display"]
-        assert "Score"   in sources[0]["display"]
+        assert "Page 3" in sources[0]["display"]
+        assert "Score"  in sources[0]["display"]
 
     def test_text_is_exact_chunk_text(self):
         """text field must be the exact chunk text — not the whole PDF."""
@@ -237,7 +253,7 @@ class TestRetrieve:
         """retrieve() must pass session_id to vector_search for isolation."""
         from api.retriever import retrieve
 
-        mock_embed.return_value        = [0.01] * 1024
+        mock_embed.return_value         = [0.01] * 1024
         mock_vector_search.return_value = []
 
         await retrieve("What is deception?", user_id="user_123", session_id="session_abc")
