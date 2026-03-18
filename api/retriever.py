@@ -21,16 +21,16 @@ import os
 # Use /app/hf_cache inside Docker (Lambda)
 # Fall back to /tmp/hf_cache locally for tests
 # /app doesn't exist outside Docker so we check if it's writable
-if os.path.isdir("/app") and os.access("/app", os.W_OK):
-    HF_CACHE = "/app/hf_cache"
+
+
+
+if os.path.isdir("/app/hf_cache"):
+    os.environ["HF_HOME"]              = "/app/hf_cache"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_HUB_OFFLINE"]       = "1"
+    os.environ["HF_DATASETS_OFFLINE"]  = "1"
 else:
-    HF_CACHE = "/tmp/hf_cache"
-
-os.environ["HF_HOME"] = HF_CACHE
-os.environ["TRANSFORMERS_OFFLINE"] = "1"   # ← tells transformers to never go online
-os.environ["HF_DATASETS_OFFLINE"]  = "1"   # ← same for datasets
-os.environ["HF_HUB_OFFLINE"]       = "1"   # ← tells huggingface_hub to never go online
-
+    os.environ["HF_HOME"]              = "/tmp/hf_cache"
 
 # Must be set BEFORE importing sentence_transformers
 # HuggingFace reads this env var at import time to decide where to cache models
