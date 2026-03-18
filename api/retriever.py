@@ -56,7 +56,7 @@ AWS_REGION           = os.environ.get("AWS_REGION", "us-east-1")
 
 # Loaded once at container startup — reused across all invocations
 # Model lives at /app/hf_cache inside the Docker image (baked in at build time)
-_RERANKER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+_RERANKER = CrossEncoder("cross-encoder/ms-marco-TinyBERT-L-2-v2")
 
 
 # ── Database connection ───────────────────────────────────────────────────────
