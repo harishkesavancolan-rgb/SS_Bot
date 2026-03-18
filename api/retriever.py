@@ -27,6 +27,10 @@ else:
     HF_CACHE = "/tmp/hf_cache"
 
 os.environ["HF_HOME"] = HF_CACHE
+os.environ["TRANSFORMERS_OFFLINE"] = "1"   # ← tells transformers to never go online
+os.environ["HF_DATASETS_OFFLINE"]  = "1"   # ← same for datasets
+os.environ["HF_HUB_OFFLINE"]       = "1"   # ← tells huggingface_hub to never go online
+
 
 # Must be set BEFORE importing sentence_transformers
 # HuggingFace reads this env var at import time to decide where to cache models
