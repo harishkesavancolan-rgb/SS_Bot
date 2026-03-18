@@ -172,7 +172,7 @@ def rerank(question: str, chunks: List[Dict], top_n: int = RERANK_TOP_N) -> List
     # If len(chunks) < top_n, slice safely returns all chunks
     reranked = sorted(chunks, key=lambda c: c["rerank_score"], reverse=True)
     reranked = reranked[:top_n]
-
+    reranked = [c for c in reranked if c["rerank_score"] > 0]
     print(f"[retriever] reranking kept top {len(reranked)} chunks")
     return reranked
 
