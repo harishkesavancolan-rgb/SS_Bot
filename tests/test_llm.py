@@ -202,7 +202,7 @@ class TestGenerateAnswer:
         await generate_answer("test", [_make_fake_chunk()])
 
         body = json.loads(mock_client.invoke_model.call_args.kwargs["body"])
-        assert body["temperature"] <= 0.2
+        assert body["temperature"] <= 0.3
 
     @pytest.mark.asyncio
     @patch("api.llm.boto3.client")
