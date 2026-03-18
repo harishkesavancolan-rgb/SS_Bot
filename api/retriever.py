@@ -56,7 +56,15 @@ AWS_REGION           = os.environ.get("AWS_REGION", "us-east-1")
 
 # Loaded once at container startup — reused across all invocations
 # Model lives at /app/hf_cache inside the Docker image (baked in at build time)
-_RERANKER = CrossEncoder("cross-encoder/ms-marco-TinyBERT-L-2-v2")
+_RERANKER = None
+
+
+def _get_reranker():
+    global _RERANKER
+    if _RERANKER is None:
+        from sentence_transformers import CrossEncoder
+        _RERANKER = CrossEncoder("cross-encoder/ms-marco-TinyBERT-L-2-v2")
+    return _RERANKER
 
 
 # ── Database connection ───────────────────────────────────────────────────────
@@ -149,12 +157,12 @@ def rerank(question: str, chunks: List[Dict], top_n: int = RERANK_TOP_N) -> List
     """
     if not chunks:
         return []
-
+    reranker = _get_reranker()
     # Pair question with each chunk text
     pairs = [(question, chunk["text"]) for chunk in chunks]
 
     # Score all pairs in one pass — runs on CPU inside Lambda
-    scores = _RERANKER.predict(pairs)
+    scores = reranker.predict(pairs)
 
     # Attach rerank score to each chunk
     for chunk, score in zip(chunks, scores):
