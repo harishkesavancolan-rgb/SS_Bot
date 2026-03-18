@@ -26,7 +26,6 @@ SYSTEM_INSTRUCTIONS = """You are a helpful assistant that ONLY answers questions
 IMPORTANT RULES:
 - ONLY use information from the provided context chunks
 - If the question cannot be answered from chunks, respond exactly: "I couldn't find that information in your uploaded documents."
-- Do NOT use general knowledge, personal opinions, or external information
 - Do NOT fabricate or hallucinate information
 - Quote relevant chunks when possible
 - Keep responses concise and factual"""
@@ -71,8 +70,12 @@ async def generate_answer(
     chunks: List[Dict],
     chat_history: List[Dict] = None,
 ) -> str:
+    
     """Sends question + chunks to Llama 3.1 8B and returns grounded answer."""
     client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+    print(f"[llm] chunks received: {len(chunks)}") 
+    for c in chunks:
+        print(f"[llm] chunk preview: {c.get('text', '')[:100]}")
 
     prompt = _build_prompt(question, chunks)
 
@@ -80,7 +83,7 @@ async def generate_answer(
     body = json.dumps({
         "prompt": prompt,
         "max_gen_len": MAX_TOKENS,
-        "temperature": 0.1,  # Low for grounded answers
+        "temperature": 0.3,  # Low for grounded answers
         "top_p": 0.9,
     })
 
